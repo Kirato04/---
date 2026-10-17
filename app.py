@@ -12,7 +12,7 @@ from infer import EMSLoadPredictor
 # 設定網頁標題與排版
 st.set_page_config(page_title="微電網 AI 預測與分析系統", layout="wide")
 st.title("⚡ 微電網 EMS 智慧用電分析與 AI 預測平台")
-st.markdown("結合**校園長短期用電統計分析**與 **LSTM 五大防禦即時預測（支援直接上傳 Excel 自動轉高頻）**。")
+st.markdown("結合**校園長短期用電統計分析**與 **LSTM 五大防禦即時預測**。")
 
 @st.cache_resource
 def load_predictor():
