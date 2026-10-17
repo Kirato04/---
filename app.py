@@ -283,53 +283,27 @@ with tab2:
             st.error("⚠️ 目前沒有可用的歷史負載資料，請先上傳檔案或完成資料轉換！")
         else:
             with st.spinner(f"正在進行未來 {forecast_days_choice} 天的五大防禦檢核與模型推論中..."):
-                history_input = [float(x) for x in raw_history]
-                # 傳入網頁上選擇的天數參數，讓 infer.py 根據需求執行單日或滾動預測
-                result = predictor.forecast_load_kw(history_input, input_timestamp, forecast_days=forecast_days_choice)
-
-            st.markdown("---")
-            st.subheader("📊 預測結果與系統稽核")
-
-            if result.get("ai_valid") == 1:
-                st.success("✅ 推論成功：資料完全合規，AI 模型正常預測！")
                 
-                pred_loads = result.get("forecast_load_kw") or result.get("forecast_load_kWh")
-                pred_times = result.get("prediction_timestamps")
-                
-                df_chart = pd.DataFrame({
-                    "預測時間": pd.to_datetime(pred_times),
-                    "AI 預測負載 (kW)": pred_loads
-                }).set_index("預測時間")
-
-                # 繪製論文級精緻圖表
-                fig, ax = plt.subplots(figsize=(12, 5))
-                ax.plot(
-                    df_chart.index, 
-                    df_chart['AI 預測負載 (kW)'], 
-                    color='crimson', 
-                    linewidth=1.8, 
-                    label=f'AI Forecast Load ({forecast_days_choice}-Day Horizon)'
-                )
-                ax.set_title(f'Multi-Step Load Forecasting Result ({forecast_days_choice} Days)', fontsize=14, fontweight='bold')
-                ax.set_xlabel('Test Timeline', fontsize=12)
-                ax.set_ylabel('Power Load (kW)', fontsize=12)
-                ax.grid(True, linestyle='--', alpha=0.5)
-                ax.legend(loc='upper right', fontsize=11)
-
-                fig.tight_layout()
-                st.pyplot(fig)
-                
-                with st.expander(f"查看詳細 {len(pred_loads)} 步預測數據表格"):
-                    st.dataframe(df_chart)
+                # 💡 修正：根據輸入的時間戳對歷史資料進行時間切片，確保不同時間戳抓到不同的歷史視窗
+                try:
+                    parsed_input_dt = pd.to_datetime(input_timestamp)
+                    if parsed_input_dt.tzinfo is None:
+                        parsed_input_dt = parsed_input_dt.tz_localize('Asia/Taipei')
                     
-                csv_data = df_chart.to_csv().encode('utf-8')
-                st.download_button(
-                    label="📥 下載預測結果 CSV 檔案",
-                    data=csv_data,
-                    file_name=f"forecast_result_{forecast_days_choice}days.csv",
-                    mime="text/csv",
-                )
-            else:
-                st.error("❌ 系統防禦機制已攔截！(ai_valid = 0)")
-                st.warning(f"**觸發錯誤原因**：©{result.get('error_reason')}")
-                st.info(f"🛡️ **啟動備援策略 (Fallback)**：`{result.get('fallback_strategy')}`")
+                    # 假設 Excel 轉出來是整年的 15 分鐘序列，我們建立時間索引來模擬真實時間對應
+                    full_time_index = pd.date_range(start=f'{sel_year2}-01-01 00:00:00+08:00', periods=len(raw_history), freq='15min')
+                    df_temp_history = pd.Series(raw_history, index=full_time_index)
+                    
+                    # 切出指定時間戳之前的資料作為歷史視窗
+                    sliced_history = df_temp_history[df_temp_history.index <= parsed_input_dt]
+                    
+                    if len(sliced_history) >= predictor.lookback_steps:
+                        history_input = sliced_history.tolist()
+                    else:
+                        st.warning("⚠️ 指定的時間戳之前資料量不足 192 筆，將自動取該年度可用之歷史資料進行預測。")
+                        history_input = [float(x) for x in raw_history]
+                except Exception:
+                    history_input = [float(x) for x in raw_history]
+
+                # 傳入切片後的歷史數據與時間戳
+                result = predictor.forecast_load_kw(history_input, input_timestamp, forecast_days=forecast_days_choice)
