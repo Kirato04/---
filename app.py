@@ -159,19 +159,19 @@ with tab1:
         st.info("💡 請先上傳您的電度電費 Excel 統計檔案，即可檢視月統計與趨勢圖。")
 
 # -------------------------------------------------------------------------
-# 頁籤二：即時歷史負載上傳與 AI 預測系統 (支援直接上傳 Excel 自動轉高頻)
+# 頁籤二：即時歷史負載上傳與 AI 預測系統 
 # -------------------------------------------------------------------------
 with tab2:
-    st.header("🚀 即時歷史負載上傳與 AI 預測系統 (支援 Excel 自動轉換)")
+    st.header("🚀 即時歷史負載上傳與 AI 預測系統 ")
     
-    with st.expander("📌 點此查看【預測檔案】格式與轉換說明（必讀）", expanded=False):
+    with st.expander("📌 點此查看【預測檔案】格式與轉換說明", expanded=False):
         st.markdown("""
         * **支援檔案格式**：
           1. **CSV 檔案**：傳統高頻 15 分鐘負載數據（需至少 192 筆以上）。
           2. **Excel 檔案**：上傳後選擇年份與大樓，系統會自動內插轉換為 15 分鐘高頻序列供 AI 預測！
         """)
 
-    file_type_choice = st.radio("請選擇您要上傳的檔案類型進行預測：", ["高頻 CSV 檔案", "長短期 Excel 統計檔案 (自動轉高頻)"], horizontal=True)
+    file_type_choice = st.radio("請選擇您要上傳的檔案類型進行預測：", ["高頻 CSV 檔案", "長短期 Excel 統計檔案"], horizontal=True)
 
     raw_history = []
     input_timestamp = st.text_input("指定資料截止時間戳 (Timestamp)", value="2026-06-07 12:00:00", key="pred_ts")
