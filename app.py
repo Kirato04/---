@@ -184,4 +184,12 @@ with tab2:
                 st.success(f"✅ 成功讀取 CSV：{uploaded_csv.name} (共 {len(df_uploaded)} 筆資料)")
                 numeric_columns = df_uploaded.select_dtypes(include=[np.number]).columns.tolist()
                 if numeric_columns:
-                    selected_col = st.selectbox("請選擇代表負載數值 (kW) 的欄位名稱", numeric_columns, key="pred_col
+                    # 修正此處的完整字串與括號
+                    selected_col = st.selectbox("請選擇代表負載數值 (kW) 的欄位名稱", numeric_columns, key="pred_col_csv")
+                    raw_history = df_uploaded[selected_col].dropna().tolist()
+            except Exception as e:
+                st.error(f"❌ 讀取 CSV 發生錯誤: {str(e)}")
+        else:
+            if st.button("📥 載入內建範例測試資料 (CSV 格式)"):
+                raw_history = np.linspace(500, 800, 200).tolist()
+                st.success(f"已載入內建範例數據（共 {len(raw_history)} 筆）")
