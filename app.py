@@ -190,6 +190,99 @@ with tab2:
             except Exception as e:
                 st.error(f"❌ 讀取 CSV 發生錯誤: {str(e)}")
         else:
-            if st.button("📥 載入內建範例測試資料 (CSV 格式)"):
-                raw_history = np.linspace(500, 800, 200).tolist()
-                st.success(f"已載入內建範例數據（共 {len(raw_history)} 筆）")
+        uploaded_excel = st.file_uploader(
+            "請上傳校園電度電費 Excel 統計檔案", type=["xlsx", "xls"], key="pred_excel_uploader"
+        )
+        if uploaded_excel is not None:
+            try:
+                xls2 = pd.ExcelFile(uploaded_excel)
+                default_sheet2 = '107-113各月度數費用合併' if '107-113各月度數費用合併' in xls2.sheet_names else xls2.sheet_names[0]
+                sheet2 = st.selectbox("請選擇資料工作表 (Sheet)", xls2.sheet_names,
+                                      index=xls2.sheet_names.index(default_sheet2), key="pred_sheet")
+                c1, c2 = st.columns(2)
+                with c1:
+                    year2 = st.selectbox("選擇年份", list(MCO_YEAR_MAP.keys()), index=len(MCO_YEAR_MAP) - 1, key="pred_year")
+                with c2:
+                    loc2 = st.selectbox("選擇大樓 / 區域", LOCATION_OPTIONS, key="pred_location")
+
+                df_x = pd.read_excel(uploaded_excel, sheet_name=sheet2, header=None)
+                monthly = extract_monthly_row(df_x, year2, loc2)
+
+                if monthly is None:
+                    st.error(f"❌ 在檔案中找不到 {year2} 年 ({MCO_YEAR_MAP[year2]}) 的【{loc2}】資料。")
+                else:
+                    series_15 = monthly_to_15min(monthly, year2)
+                    if series_15 is None:
+                        st.error("❌ 有效的月份資料少於 2 個月，無法內插。")
+                    else:
+                        if pd.notna(ts_parsed) and series_15.index[0] <= ts_parsed <= series_15.index[-1]:
+                            series_15 = series_15[:ts_parsed]
+                        else:
+                            st.warning("⚠️ 指定的時間戳不在所選年份範圍內，將使用整年序列的最後 192 筆以上資料。")
+                        st.session_state.raw_history = series_15.tolist()
+                        st.session_state.history_source = f"Excel：{uploaded_excel.name} / {year2} / {loc2}（已內插為 15 分鐘）"
+                        st.success(f"✅ 已轉換為 15 分鐘序列，共 {len(series_15)} 筆。")
+            except ImportError:
+                st.error("❌ 讀取 .xls 需要 xlrd 套件，請在 requirements.txt 加入 xlrd，或改上傳 .xlsx。")
+            except Exception as e:
+                st.error(f"❌ 解析 Excel 時發生錯誤: {str(e)}")
+
+    # ---------------- 執行預測與繪圖 ----------------
+    st.markdown("---")
+    raw_history = st.session_state.raw_history
+
+    if len(raw_history) == 0:
+        st.info("💡 請先上傳檔案或載入範例資料，再執行預測。")
+    else:
+        st.write(f"📂 目前待預測資料：**{st.session_state.history_source}**，共 **{len(raw_history)}** 筆")
+
+        if st.button("🚀 執行 AI 預測", type="primary", key="run_pred"):
+            result = predictor.forecast_load_kw(raw_history, input_timestamp)
+            lookback = predictor.lookback_steps or 192
+
+            if pd.isna(ts_parsed):
+                st.error(f"❌ 時間戳格式無法解析：{result.get('error_reason')}")
+            else:
+                hist_tail = np.asarray(raw_history, dtype=float)[-lookback:]
+                hist_idx = pd.date_range(end=ts_parsed, periods=len(hist_tail), freq="15min")
+
+                if result["ai_valid"] == 1:
+                    forecast = np.asarray(result["forecast_load_kw"], dtype=float)
+                    forecast_label = "LSTM Forecast"
+                    st.success(f"✅ AI 預測成功（模型 {result['model_version']}，共 {len(forecast)} 步）")
+                else:
+                    steps = int((predictor.horizon_min or 1440) // 15)
+                    forecast = fallback_forecast(raw_history, result["fallback_strategy"], steps)
+                    forecast_label = f"Fallback ({result['fallback_strategy']})"
+                    st.warning(f"⚠️ 觸發防禦機制，已改用 Fallback：{result['error_reason']}")
+
+                if forecast is None:
+                    st.error("❌ 沒有可用的有效資料，無法產生預測。")
+                else:
+                    fc_idx = pd.date_range(start=ts_parsed + pd.Timedelta(minutes=15), periods=len(forecast), freq="15min")
+
+                    fig, ax = plt.subplots(figsize=(12, 5))
+                    ax.plot(hist_idx, hist_tail, color="tab:blue", linewidth=1.8, label="Historical Load (Input)")
+                    ax.plot(fc_idx, forecast, color="crimson", linewidth=2.0, linestyle="--", label=forecast_label)
+                    ax.axvline(ts_parsed, color="gray", linestyle=":", linewidth=1.2, label="Forecast Start")
+                    ax.set_title("Full Test Set Load Forecasting Result", fontsize=14, fontweight="bold")
+                    ax.set_xlabel("Time", fontsize=12)
+                    ax.set_ylabel("Power Load (kW)", fontsize=12)
+                    ax.grid(True, linestyle="--", alpha=0.6)
+                    ax.legend(loc="best", fontsize=11)
+                    fig.autofmt_xdate()
+                    fig.tight_layout()
+                    st.pyplot(fig)
+                    plt.close(fig)
+
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("預測峰值負載", f"{forecast.max():,.2f} kW")
+                    m2.metric("預測平均負載", f"{forecast.mean():,.2f} kW")
+                    m3.metric("預測谷值負載", f"{forecast.min():,.2f} kW")
+
+                    df_out = pd.DataFrame({"timestamp": fc_idx, "forecast_load_kw": np.round(forecast, 2)})
+                    st.download_button("📥 下載預測結果 (CSV)", df_out.to_csv(index=False).encode("utf-8-sig"),
+                                       file_name="load_forecast.csv", mime="text/csv", key="dl_forecast")
+
+                    with st.expander("查看推論原始回傳內容"):
+                        st.json({k: v for k, v in result.items() if k not in ("forecast_load_kw", "prediction_timestamps")})
