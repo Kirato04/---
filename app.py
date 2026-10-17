@@ -6,12 +6,13 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import calendar
 from infer import EMSLoadPredictor
 
 # 設定網頁標題與排版
-st.set_page_config(page_title="微電網 AI 負載預測與分析系統", layout="wide")
-st.title("⚡ 微電網 EMS 智慧負載預測與校園用電分析平台")
-st.markdown("結合**校園長短期用電統計分析**與 **LSTM 五大防禦即時預測**的完整專題系統。")
+st.set_page_config(page_title="微電網 AI 預測與分析系統", layout="wide")
+st.title("⚡ 微電網 EMS 智慧用電分析與 AI 預測平台")
+st.markdown("結合**校園長短期用電統計分析**與 **LSTM 五大防禦即時預測（支援直接上傳 Excel 自動轉高頻）**。")
 
 @st.cache_resource
 def load_predictor():
@@ -32,43 +33,40 @@ else:
 
 # 建立三大功能頁籤 (Tabs)
 tab1, tab2 = st.tabs([
-    "📈 1. 歷史用電統計與動態分析 (上傳檔案)", 
-    "🚀 2. 即時歷史負載上傳與 AI 預測系統"
+    "📈 1. 歷史用電統計與動態趨勢分析", 
+    "🚀 2. 即時歷史負載上傳與 AI 預測系統 (支援 Excel 自動轉高頻)"
 ])
 
 # -------------------------------------------------------------------------
-# 頁籤一：歷史用電統計與動態分析 (明確標示 Excel 規格與欄位結構)
+# 頁籤一：歷史用電統計與動態分析 (保留原本的月統計與圖表)
 # -------------------------------------------------------------------------
 with tab1:
     st.header("📈 歷史用電統計與動態趨勢分析")
     
-    # 💡 具體明確的檔案規格與內容說明
-    with st.expander("📌 點此查看【歷史統計檔案】的規格與欄位說明", expanded=False):
+    with st.expander("📌 點此查看【歷史統計檔案】的規格與欄位說明（必讀）", expanded=False):
         st.markdown("""
-        為了讓系統能正確解析並計算統計摘要，您上傳的檔案必須符合以下規範：
         * **檔案格式**：Excel 試算表（`.xlsx` 或 `.xls`）。
-        * **工作表名稱（Sheet）**：需包含各月份用電度數彙整表。
+        * **工作表名稱（Sheet）**：需包含各月份用電度數彙整表（例如 `107-113各月度數費用合併`）。
         * **資料結構規範**：
-          1. **第一欄（Row 0）**需包含年份區塊標示（如 `107年`、`113年` 等民國年字串）。
+          1. **第一欄（Row 0）**需包含年份區塊標示（如 `107年`、`113年`）。
           2. **第二欄起**需橫向展開對應各個行政區或大樓名稱（如 `行政區`、`商學`、`校友` 等）。
           3. **向右欄位**必須依序包含 **1 到 12 月**的用電度數（kWh）數值。
         """)
 
-    uploaded_excel = st.file_uploader(
+    uploaded_excel_tab1 = st.file_uploader(
         "請上傳校園電度電費 Excel 統計檔案", 
         type=["xlsx", "xls"], 
-        key="excel_uploader",
-        help="請上傳符合上述多年度、橫向 12 月份結構的 Excel 統計檔案。"
+        key="excel_uploader_tab1"
     )
 
-    if uploaded_excel is not None:
+    if uploaded_excel_tab1 is not None:
         try:
-            xls = pd.ExcelFile(uploaded_excel)
+            xls = pd.ExcelFile(uploaded_excel_tab1)
             default_sheet = '107-113各月度數費用合併' if '107-113各月度數費用合併' in xls.sheet_names else xls.sheet_names[0]
-            sheet_to_use = st.selectbox("請選擇資料工作表 (Sheet)", xls.sheet_names, index=xls.sheet_names.index(default_sheet) if default_sheet in xls.sheet_names else 0)
+            sheet_to_use = st.selectbox("請選擇資料工作表 (Sheet)", xls.sheet_names, index=xls.sheet_names.index(default_sheet) if default_sheet in xls.sheet_names else 0, key="sheet_tab1")
             
-            df_excel = pd.read_excel(uploaded_excel, sheet_name=sheet_to_use, header=None)
-            st.success(f"✅ 成功讀取檔案：{uploaded_excel.name} (工作表: {sheet_to_use})")
+            df_excel = pd.read_excel(uploaded_excel_tab1, sheet_name=sheet_to_use, header=None)
+            st.success(f"✅ 成功讀取檔案：{uploaded_excel_tab1.name} (工作表: {sheet_to_use})")
 
             col_y1, col_y2 = st.columns(2)
             with col_y1:
@@ -162,89 +160,23 @@ with tab1:
         except Exception as e:
             st.error(f"❌ 解析上傳的 Excel 檔案時發生錯誤: {str(e)}")
     else:
-        st.info("💡 請先上傳您的電度電費 Excel 統計檔案（例如 `107-113年電度電費數據...xlsx`），上傳後即可自由切換年度與分析區域。")
+        st.info("💡 請先上傳您的電度電費 Excel 統計檔案，即可檢視月統計與趨勢圖。")
 
 # -------------------------------------------------------------------------
-# 頁籤二：即時歷史負載上傳與 AI 預測系統 (明確標示 CSV 規格與資料長度)
+# 頁籤二：即時歷史負載上傳與 AI 預測系統 (支援直接上傳 Excel 自動轉高頻並預測)
 # -------------------------------------------------------------------------
 with tab2:
-    st.header("🚀 即時歷史負載上傳與 AI 預測系統")
+    st.header("🚀 即時歷史負載上傳與 AI 預測系統 (支援 Excel 自動轉換)")
     
-    # 💡 具體明確的 AI 預測檔案規格說明
-    with st.expander("📌 點此查看【AI 預測檔案 (CSV)】的規格與防禦限制（必讀）", expanded=False):
+    with st.expander("📌 點此查看【預測檔案】格式與轉換說明（必讀）", expanded=False):
         st.markdown("""
-        為了讓 LSTM 模型與五大防禦機制順利進行推論，您上傳的 CSV 檔案必須符合以下規範：
-        * **檔案格式**：純文字逗號分隔值檔案（`.csv`）。
-        * **必要欄位**：需包含至少一個代表**電力負載數值（kW）**的數值欄位（上傳後可於下方選單指定）。
-        * **資料筆數限制（核心防禦要求）**：
-          * 為了滿足模型時間序列滑動視窗（Lookback）與防禦檢核，資料量**必須至少包含 192 筆以上**的連續高頻資料（建議為每 15 分鐘一筆，約 2 天至數天之連續紀錄）。
-          * 若資料筆數不足 192 筆，系統將觸發長度檢核防禦攔截（`ai_valid = 0`）並啟動備援策略。
+        * **支援檔案格式**：
+          1. **CSV 檔案**：傳統高頻 15 分鐘負載數據（需至少 192 筆以上）。
+          2. **Excel 檔案（例如您的用電統計表）**：上傳後可直接選擇年份與大樓，系統會自動將其月度用電量內插轉換為 15 分鐘高頻序列，直接供 AI 模型進行預測！
         """)
 
-    uploaded_file = st.file_uploader(
-        "請上傳包含 15 分鐘高頻歷史用電的 CSV 檔案", 
-        type=["csv"], 
-        key="predict_uploader",
-        help="請上傳具備至少 192 筆連續負載數值的 CSV 檔案。"
-    )
-    
-    input_timestamp = st.text_input("指定資料截止時間戳 (Timestamp)", value="2026-06-07 12:00:00")
+    # 選擇檔案類型
+    file_type_choice = st.radio("請選擇您要上傳的檔案類型進行預測：", ["高頻 CSV 檔案", "長短期 Excel 統計檔案 (自動轉高頻)"], horizontal=True)
 
     raw_history = []
-
-    if uploaded_file is not None:
-        try:
-            df_uploaded = pd.read_csv(uploaded_file)
-            st.success(f"✅ 成功讀取檔案：{uploaded_file.name} (共 {len(df_uploaded)} 筆資料)")
-            
-            numeric_columns = df_uploaded.select_dtypes(include=[np.number]).columns.tolist()
-            if numeric_columns:
-                selected_col = st.selectbox("請選擇代表負載數值 (kW) 的欄位名稱", numeric_columns, key="pred_col")
-                raw_history = df_uploaded[selected_col].dropna().tolist()
-                st.info(f"已自動萃取欄位 `{selected_col}` 的數值共 {len(raw_history)} 筆。")
-        except Exception as e:
-            st.error(f"❌ 讀取 CSV 檔案時發生錯誤: {str(e)}")
-    else:
-        if st.button("📥 載入內建範例測試資料"):
-            raw_history = np.linspace(500, 800, 200).tolist()
-            st.success(f"已載入內建範例數據（共 {len(raw_history)} 筆）")
-
-    if st.button("🚀 開始執行 AI 預測與防禦檢核", type="primary"):
-        if not predictor.is_ready:
-            st.error("模型尚未就緒，無法進行預測。")
-        elif len(raw_history) == 0:
-            st.error("⚠️ 目前沒有可用的歷史負載資料，請先上傳檔案或載入範例資料！")
-        else:
-            with st.spinner("正在進行五大防禦檢核與模型推論中..."):
-                result = predictor.forecast_load_kw(raw_history, input_timestamp)
-
-            st.markdown("---")
-            st.subheader("📊 預測結果與系統稽核")
-
-            if result.get("ai_valid") == 1:
-                st.success("✅ 推論成功：資料完全合規，AI 模型正常預測！")
-                
-                pred_loads = result.get("forecast_load_kw")
-                pred_times = result.get("prediction_timestamps")
-                
-                df_chart = pd.DataFrame({
-                    "預測時間": pd.to_datetime(pred_times),
-                    "AI 預測負載 (kW)": pred_loads
-                }).set_index("預測時間")
-
-                st.line_chart(df_chart)
-                
-                with st.expander("查看詳細 96 步預測數據表格"):
-                    st.dataframe(df_chart)
-                    
-                csv_data = df_chart.to_csv().encode('utf-8')
-                st.download_button(
-                    label="📥 下載預測結果 CSV 檔案",
-                    data=csv_data,
-                    file_name="forecast_result.csv",
-                    mime="text/csv",
-                )
-            else:
-                st.error(f"❌ 系統防禦機制已攔截！(ai_valid = 0)")
-                st.warning(f"**觸發錯誤原因**：{result.get('error')}")
-                st.info(f"🛡️ **啟動備援策略 (Fallback)**：`{result.get('fallback_strategy')}`")
+    input_timestamp = st.text_input("指定資料截止時間戳 (Timestamp)", value="2026-06-07 12:00:00", key="pred_ts")
