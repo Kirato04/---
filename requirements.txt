@@ -1,8 +1,12 @@
 streamlit
-pandas
-numpy
+pandas==2.3.3
+numpy==2.2.6
 matplotlib
 openpyxl
-tensorflow
-keras
-joblib
+tensorflow==2.21.0
+keras==3.12.4
+scikit-learn==1.7.2
+joblib==1.5.3
+paho-mqtt==1.6.1
+pytz==2026.3
+python-dateutil==2.9.0.post0
