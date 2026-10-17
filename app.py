@@ -175,7 +175,6 @@ with tab2:
           2. **Excel 檔案（例如您的用電統計表）**：上傳後可直接選擇年份與大樓，系統會自動將其月度用電量內插轉換為 15 分鐘高頻序列，直接供 AI 模型進行預測！
         """)
 
-    # 選擇檔案類型
     file_type_choice = st.radio("請選擇您要上傳的檔案類型進行預測：", ["高頻 CSV 檔案", "長短期 Excel 統計檔案 (自動轉高頻)"], horizontal=True)
 
     raw_history = []
@@ -191,7 +190,6 @@ with tab2:
                 if numeric_columns:
                     selected_col = st.selectbox("請選擇代表負載數值 (kW) 的欄位名稱", numeric_columns, key="pred_col_csv")
                     raw_history = df_uploaded[selected_col].dropna().tolist()
-                    st.info(f"已自動萃取欄位 `{selected_col}` 的數值共 {len(raw_history)} 筆。")
             except Exception as e:
                 st.error(f"❌ 讀取 CSV 發生錯誤: {str(e)}")
         else:
@@ -200,7 +198,6 @@ with tab2:
                 st.success(f"已載入內建範例數據（共 {len(raw_history)} 筆）")
 
     else:
-        # 💡 這裡就是剛剛漏掉的 Excel 上傳元件！
         uploaded_excel_tab2 = st.file_uploader("請上傳您的電度電費 Excel 統計檔案 (.xlsx)", type=["xlsx", "xls"], key="pred_excel_uploader")
         
         if uploaded_excel_tab2 is not None:
@@ -210,7 +207,6 @@ with tab2:
                 sheet_to_use2 = st.selectbox("選擇資料工作表 (Sheet)", xls2.sheet_names, index=xls2.sheet_names.index(default_sheet2) if default_sheet2 in xls2.sheet_names else 0, key="sheet_tab2")
                 
                 df_excel2 = pd.read_excel(uploaded_excel_tab2, sheet_name=sheet_to_use2, header=None)
-                st.success(f"✅ 成功讀取 Excel：{uploaded_excel_tab2.name}")
                 
                 c1, c2 = st.columns(2)
                 with c1:
@@ -247,7 +243,6 @@ with tab2:
                             break
 
                 if target_data2 is not None:
-                    # 執行內插轉換成 15 分鐘高頻數據
                     high_freq_list = []
                     for m_idx, m_kwh in enumerate(target_data2, start=1):
                         if pd.isna(m_kwh):
@@ -266,9 +261,9 @@ with tab2:
                         high_freq_list.extend(kw_series.tolist())
 
                     raw_history = high_freq_list
-                    st.success(f"✅ 成功將 {sel_year2} 年【{sel_loc2}】的月用電量轉換為 15 分鐘高頻數據，共計 {len(raw_history)} 筆，已準備好進行 AI 預測！")
+                    st.success(f"✅ 成功將 {sel_year2} 年【{sel_loc2}】轉換為高頻序列 (共 {len(raw_history)} 筆)")
                 else:
-                    st.warning("⚠️ 找不到對應年份與區域的數值，請確認選擇是否正確。")
+                    st.warning("⚠️ 找不到對應年份與區域的數值。")
 
             except Exception as e:
                 st.error(f"❌ Excel 轉換處理時發生錯誤: {str(e)}")
@@ -277,12 +272,14 @@ with tab2:
     st.markdown("---")
     if st.button("🚀 開始執行 AI 預測與五大防禦檢核", type="primary"):
         if not predictor.is_ready:
-            st.error("模型尚未就緒，無法進行預測。")
+            st.error(f"❌ 模型尚未就緒，無法進行預測。原因: {predictor.init_error}")
         elif len(raw_history) == 0:
             st.error("⚠️ 目前沒有可用的歷史負載資料，請先上傳檔案或完成資料轉換！")
         else:
             with st.spinner("正在進行五大防禦檢核與模型推論中..."):
-                result = predictor.forecast_load_kw(raw_history, input_timestamp)
+                # 確保傳入的是乾淨的 list 且長度大於 lookback
+                history_input = [float(x) for x in raw_history]
+                result = predictor.forecast_load_kw(history_input, input_timestamp)
 
             st.markdown("---")
             st.subheader("📊 預測結果與系統稽核")
@@ -290,7 +287,7 @@ with tab2:
             if result.get("ai_valid") == 1:
                 st.success("✅ 推論成功：資料完全合規，AI 模型正常預測！")
                 
-                pred_loads = result.get("forecast_load_kWh") if "forecast_load_kWh" in result else result.get("forecast_load_kw")
+                pred_loads = result.get("forecast_load_kw") or result.get("forecast_load_kWh")
                 pred_times = result.get("prediction_timestamps")
                 
                 df_chart = pd.DataFrame({
@@ -312,5 +309,5 @@ with tab2:
                 )
             else:
                 st.error(f"❌ 系統防禦機制已攔截！(ai_valid = 0)")
-                st.warning(f"**觸發錯誤原因**：{result.get('error')}")
+                st.warning(f"**觸發錯誤原因**：{result.get('error_reason')}")
                 st.info(f"🛡️ **啟動備援策略 (Fallback)**：`{result.get('fallback_strategy')}`")
