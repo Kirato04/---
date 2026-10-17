@@ -1,0 +1,7 @@
+{
+  "forecast_load_kw": 426.3100,
+  "prediction_timestamp": "2026-08-23T10:30:00+08:00",
+  "prediction_horizon_min": 30,
+  "model_version": "v2_public_data_fixed",
+  "ai_valid": 1
+}

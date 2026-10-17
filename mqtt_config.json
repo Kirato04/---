@@ -1,0 +1,10 @@
+{
+  "broker_host": "broker.emqx.io",
+  "broker_port": 1883,
+  "topic": "eams/dev/a83f41c2/ai/load_forecast/v1",
+  "qos": 1,
+  "retain": false,
+  "stale_timeout_seconds": 120.0,
+  "validation_mode": "live",
+  "development_value_not_final": true
+}

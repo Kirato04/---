@@ -1,0 +1,15 @@
+{
+    "data_source": "NANOGUNE Zenodo Dataset",
+    "meter_name": "NAN_Red_General_Electricity_Energy_kWh",
+    "meter_description": "Red_General_Electricity_Energy_kWh (Site Level)",
+    "original_unit": "Kilowatthour (kWh)",
+    "target_name": "load_kw",
+    "target_unit": "kW",
+    "interval_minutes": 15,
+    "lookback_steps": 192,
+    "lookback_minutes": 2880,
+    "steps_ahead": 96,
+    "forecast_horizon_minutes": 1440,
+    "model_type": "TensorFlow Keras LSTM",
+    "model_version": "v2_public_data_fixed"
+}
