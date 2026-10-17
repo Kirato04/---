@@ -159,31 +159,32 @@ with tab1:
         st.info("💡 請先上傳您的電度電費 Excel 統計檔案，即可檢視月統計與趨勢圖。")
 
 # -------------------------------------------------------------------------
-# 頁籤二：即時歷史負載上傳與 AI 預測系統 
+# 頁籤二：即時歷史負載上傳與 AI 預測系統 (支援 Excel 自動轉換)
 # -------------------------------------------------------------------------
 with tab2:
-    st.header("🚀 即時歷史負載上傳與 AI 預測系統 ")
+    st.header("🚀 即時歷史負載上傳與 AI 預測系統 (支援 Excel 自動轉換)")
     
-    with st.expander("📌 點此查看【預測檔案】格式與轉換說明", expanded=False):
+    with st.expander("📌 點此查看【預測檔案】格式與轉換說明（必讀）", expanded=False):
         st.markdown("""
         * **支援檔案格式**：
           1. **CSV 檔案**：傳統高頻 15 分鐘負載數據（需至少 192 筆以上）。
-          2. **Excel 檔案**：上傳後選擇年份與大樓，系統會自動內插轉換為 15 分鐘高頻序列供 AI 預測！
+          2. **Excel 檔案**：上傳後選擇大樓，系統會**自動根據你輸入的時間戳年份**轉換為 15 分鐘高頻序列供 AI 預測！
         """)
 
-    file_type_choice = st.radio("請選擇您要上傳的檔案類型進行預測：", ["高頻 CSV 檔案", "長短期 Excel 統計檔案"], horizontal=True)
+    file_type_choice = st.radio("請選擇您要上傳的檔案類型進行預測：", ["高頻 CSV 檔案", "長短期 Excel 統計檔案 (自動轉高頻)"], horizontal=True)
 
     raw_history = []
-    input_timestamp = st.text_input("指定資料截止時間戳 (Timestamp)", value="2026-06-07 12:00:00", key="pred_ts")
+    
+    # 讓使用者輸入時間戳 (系統會自動抓取其中的年份來對應 Excel 資料)
+    input_timestamp = st.text_input("指定資料截止時間戳 (Timestamp)", value="2024-06-07 12:00:00", key="pred_ts")
 
-    # 💡 新增：網端專用的自由選擇預測天數拉桿
     forecast_days_choice = st.slider(
         "選擇預測天數範圍 (Forecast Horizon)", 
         min_value=1, 
         max_value=7, 
         value=1, 
         step=1,
-        help="可自由選擇在網頁上預測未來 1 天到 7 天的用電趨勢（實機預設或 API 呼叫時仍可維持單日傳輸）"
+        help="可自由選擇在網頁上預測未來 1 天到 7 天的用電趨勢"
     )
 
     if file_type_choice == "高頻 CSV 檔案":
@@ -208,20 +209,28 @@ with tab2:
         
         if uploaded_excel_tab2 is not None:
             try:
+                # 💡 核心改良：直接從使用者輸入的時間戳自動解析年份！
+                parsed_input_dt = pd.to_datetime(input_timestamp)
+                if pd.isna(parsed_input_dt):
+                    st.error("❌ 時間戳格式錯誤，請確保格式如：2024-06-07 12:00:00")
+                    sel_year2 = 2024
+                else:
+                    sel_year2 = parsed_input_dt.year
+
                 xls2 = pd.ExcelFile(uploaded_excel_tab2)
                 default_sheet2 = '107-113各月度數費用合併' if '107-113各月度數費用合併' in xls2.sheet_names else xls2.sheet_names[0]
                 sheet_to_use2 = st.selectbox("選擇資料工作表 (Sheet)", xls2.sheet_names, index=xls2.sheet_names.index(default_sheet2) if default_sheet2 in xls2.sheet_names else 0, key="sheet_tab2")
                 
                 df_excel2 = pd.read_excel(uploaded_excel_tab2, sheet_name=sheet_to_use2, header=None)
                 
-                c1, c2 = st.columns(2)
-                with c1:
-                    sel_year2 = st.selectbox("選擇轉換年份", [2018, 2019, 2020, 2021, 2022, 2023, 2024], index=6, key="conv_year")
-                    mco_map2 = {2018: '107年', 2019: '108年', 2020: '109年', 2021: '110年', 2022: '111年', 2023: '112年', 2024: '113年'}
-                    t_mco2 = mco_map2.get(sel_year2, '113年')
-                with c2:
-                    loc_opts2 = ['不分區 (全校總用電)', '行政區', '商學', '校友', '男', '女', '中科', '文創']
-                    sel_loc2 = st.selectbox("選擇轉換大樓/區域", loc_opts2, key="conv_loc")
+                # 西元年對應民國年對照表
+                mco_map2 = {2018: '107年', 2019: '108年', 2020: '109年', 2021: '110年', 2022: '111年', 2023: '112年', 2024: '113年'}
+                t_mco2 = mco_map2.get(sel_year2, '113年') # 若超出範圍預設用 113年
+
+                loc_opts2 = ['不分區 (全校總用電)', '行政區', '商學', '校友', '男', '女', '中科', '文創']
+                sel_loc2 = st.selectbox("選擇轉換大樓/區域", loc_opts2, key="conv_loc")
+
+                st.info(f"📅 系統已自動根據時間戳判斷：將載入 **{sel_year2} 年 ({t_mco2})** 的用電統計進行高頻轉換。")
 
                 target_data2 = None
                 if sel_loc2 == '不分區 (全校總用電)':
@@ -269,7 +278,7 @@ with tab2:
                     raw_history = high_freq_list
                     st.success(f"✅ 成功將 {sel_year2} 年【{sel_loc2}】轉換為高頻序列 (共 {len(raw_history)} 筆)")
                 else:
-                    st.warning("⚠️ 找不到對應年份與區域的數值。")
+                    st.warning(f"⚠️ 在檔案中找不到 {sel_year2} 年 ({t_mco2}) 對應的【{sel_loc2}】數值。")
 
             except Exception as e:
                 st.error(f"❌ Excel 轉換處理時發生錯誤: {str(e)}")
@@ -285,13 +294,13 @@ with tab2:
             try:
                 with st.spinner(f"正在進行未來 {forecast_days_choice} 天的五大防禦檢核與模型推論中..."):
                     
-                    # 1. 確保時間戳解析安全
                     parsed_input_dt = pd.to_datetime(input_timestamp)
                     if parsed_input_dt.tzinfo is None:
                         parsed_input_dt = parsed_input_dt.tz_localize('Asia/Taipei')
                     
-                    # 2. 建立時間序列並切片
-                    full_time_index = pd.date_range(start=f'{sel_year2}-01-01 00:00:00+08:00', periods=len(raw_history), freq='15min')
+                    # 建立時間序列並根據時間戳切片
+                    sel_year_for_index = parsed_input_dt.year
+                    full_time_index = pd.date_range(start=f'{sel_year_for_index}-01-01 00:00:00+08:00', periods=len(raw_history), freq='15min')
                     df_temp_history = pd.Series(raw_history, index=full_time_index)
                     
                     sliced_history = df_temp_history[df_temp_history.index <= parsed_input_dt]
@@ -302,10 +311,9 @@ with tab2:
                         st.warning("⚠️ 指定的時間戳之前資料量不足 192 筆，已自動改用該年度完整歷史資料進行預測。")
                         history_input = [float(x) for x in raw_history]
 
-                    # 3. 呼叫推論引擎
+                    # 呼叫推論引擎
                     result = predictor.forecast_load_kw(history_input, input_timestamp, forecast_days=forecast_days_choice)
 
-                # 4. 檢查推論結果並渲染畫面
                 st.markdown("---")
                 st.subheader("📊 預測結果與系統稽核")
 
@@ -320,7 +328,7 @@ with tab2:
                         "AI 預測負載 (kW)": pred_loads
                     }).set_index("預測時間")
 
-                    # 繪製精緻圖表
+                    # 繪製圖表
                     fig, ax = plt.subplots(figsize=(12, 5))
                     ax.plot(
                         df_chart.index, 
