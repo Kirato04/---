@@ -184,81 +184,141 @@ with tab2:
                 st.success(f"✅ 成功讀取 CSV：{uploaded_csv.name} (共 {len(df_uploaded)} 筆資料)")
                 numeric_columns = df_uploaded.select_dtypes(include=[np.number]).columns.tolist()
                 if numeric_columns:
-                    # 修正此處的完整字串與括號
                     selected_col = st.selectbox("請選擇代表負載數值 (kW) 的欄位名稱", numeric_columns, key="pred_col_csv")
                     raw_history = df_uploaded[selected_col].dropna().tolist()
             except Exception as e:
                 st.error(f"❌ 讀取 CSV 發生錯誤: {str(e)}")
         else:
-        uploaded_excel = st.file_uploader(
-            "請上傳校園電度電費 Excel 統計檔案", type=["xlsx", "xls"], key="pred_excel_uploader"
-        )
-        if uploaded_excel is not None:
+            if st.button("📥 載入內建範例測試資料 (CSV 格式)"):
+                raw_history = np.linspace(500, 800, 200).tolist()
+                st.success(f"已載入內建範例數據（共 {len(raw_history)} 筆）")
+
+    else:
+        uploaded_excel_tab2 = st.file_uploader("請上傳您的電度電費 Excel 統計檔案 (.xlsx)", type=["xlsx", "xls"], key="pred_excel_uploader")
+        
+        if uploaded_excel_tab2 is not None:
             try:
-                xls2 = pd.ExcelFile(uploaded_excel)
+                xls2 = pd.ExcelFile(uploaded_excel_tab2)
                 default_sheet2 = '107-113各月度數費用合併' if '107-113各月度數費用合併' in xls2.sheet_names else xls2.sheet_names[0]
-                sheet2 = st.selectbox("請選擇資料工作表 (Sheet)", xls2.sheet_names,
-                                      index=xls2.sheet_names.index(default_sheet2), key="pred_sheet")
+                sheet_to_use2 = st.selectbox("選擇資料工作表 (Sheet)", xls2.sheet_names, index=xls2.sheet_names.index(default_sheet2) if default_sheet2 in xls2.sheet_names else 0, key="sheet_tab2")
+                
+                df_excel2 = pd.read_excel(uploaded_excel_tab2, sheet_name=sheet_to_use2, header=None)
+                
                 c1, c2 = st.columns(2)
                 with c1:
-                    year2 = st.selectbox("選擇年份", list(MCO_YEAR_MAP.keys()), index=len(MCO_YEAR_MAP) - 1, key="pred_year")
+                    sel_year2 = st.selectbox("選擇轉換年份", [2018, 2019, 2020, 2021, 2022, 2023, 2024], index=6, key="conv_year")
+                    mco_map2 = {2018: '107年', 2019: '108年', 2020: '109年', 2021: '110年', 2022: '111年', 2023: '112年', 2024: '113年'}
+                    t_mco2 = mco_map2.get(sel_year2, '113年')
                 with c2:
-                    loc2 = st.selectbox("選擇大樓 / 區域", LOCATION_OPTIONS, key="pred_location")
+                    loc_opts2 = ['不分區 (全校總用電)', '行政區', '商學', '校友', '男', '女', '中科', '文創']
+                    sel_loc2 = st.selectbox("選擇轉換大樓/區域", loc_opts2, key="conv_loc")
 
-                df_x = pd.read_excel(uploaded_excel, sheet_name=sheet2, header=None)
-                monthly = extract_monthly_row(df_x, year2, loc2)
-
-                if monthly is None:
-                    st.error(f"❌ 在檔案中找不到 {year2} 年 ({MCO_YEAR_MAP[year2]}) 的【{loc2}】資料。")
+                target_data2 = None
+                if sel_loc2 == '不分區 (全校總用電)':
+                    recs = []
+                    for idx, row in df_excel2.iterrows():
+                        val = str(row.iloc[0]).strip()
+                        if val == '總和':
+                            for prev in range(idx-1, max(-1, idx-10), -1):
+                                if t_mco2 in str(df_excel2.iloc[prev, 0]):
+                                    recs.append(row.iloc[1:13].values)
+                                    break
+                    if len(recs) >= 2:
+                        target_data2 = np.array(recs[0], dtype=float) + np.array(recs[1], dtype=float)
                 else:
-                    series_15 = monthly_to_15min(monthly, year2)
-                    if series_15 is None:
-                        st.error("❌ 有效的月份資料少於 2 個月，無法內插。")
-                    else:
-                        if pd.notna(ts_parsed) and series_15.index[0] <= ts_parsed <= series_15.index[-1]:
-                            series_15 = series_15[:ts_parsed]
-                        else:
-                            st.warning("⚠️ 指定的時間戳不在所選年份範圍內，將使用整年序列的最後 192 筆以上資料。")
-                        st.session_state.raw_history = series_15.tolist()
-                        st.session_state.history_source = f"Excel：{uploaded_excel.name} / {year2} / {loc2}（已內插為 15 分鐘）"
-                        st.success(f"✅ 已轉換為 15 分鐘序列，共 {len(series_15)} 筆。")
-            except ImportError:
-                st.error("❌ 讀取 .xls 需要 xlrd 套件，請在 requirements.txt 加入 xlrd，或改上傳 .xlsx。")
-            except Exception as e:
-                st.error(f"❌ 解析 Excel 時發生錯誤: {str(e)}")else:
-        uploaded_excel = st.file_uploader(
-            "請上傳校園電度電費 Excel 統計檔案", type=["xlsx", "xls"], key="pred_excel_uploader"
-        )
-        if uploaded_excel is not None:
-            try:
-                xls2 = pd.ExcelFile(uploaded_excel)
-                default_sheet2 = '107-113各月度數費用合併' if '107-113各月度數費用合併' in xls2.sheet_names else xls2.sheet_names[0]
-                sheet2 = st.selectbox("請選擇資料工作表 (Sheet)", xls2.sheet_names,
-                                      index=xls2.sheet_names.index(default_sheet2), key="pred_sheet")
-                c1, c2 = st.columns(2)
-                with c1:
-                    year2 = st.selectbox("選擇年份", list(MCO_YEAR_MAP.keys()), index=len(MCO_YEAR_MAP) - 1, key="pred_year")
-                with c2:
-                    loc2 = st.selectbox("選擇大樓 / 區域", LOCATION_OPTIONS, key="pred_location")
+                    cur_block = None
+                    for idx, row in df_excel2.iterrows():
+                        val = str(row.iloc[0]).strip()
+                        if t_mco2 in val and '度數' not in val and '費用' not in val:
+                            cur_block = t_mco2
+                            continue
+                        elif any(y in val for y in ['107年', '108年', '109年', '110年', '111年', '112年', '113年']) and val != t_mco2:
+                            cur_block = None
+                        if cur_block == t_mco2 and val == sel_loc2:
+                            target_data2 = row.iloc[1:13].values
+                            break
 
-                df_x = pd.read_excel(uploaded_excel, sheet_name=sheet2, header=None)
-                monthly = extract_monthly_row(df_x, year2, loc2)
+                if target_data2 is not None:
+                    high_freq_list = []
+                    for m_idx, m_kwh in enumerate(target_data2, start=1):
+                        if pd.isna(m_kwh):
+                            m_kwh = 0.0
+                        days_in_m = calendar.monthrange(sel_year2, m_idx)[1]
+                        intervals = days_in_m * 96
+                        day_idx = np.arange(intervals)
+                        hour_d = (day_idx % 96) * 0.25
+                        profile = 1.0 + 0.4 * np.sin(2 * np.pi * (hour_d - 6) / 24)
+                        profile = np.clip(profile, 0.3, 1.8)
+                        avg_kw = m_kwh / (intervals * 0.25) if intervals > 0 else 0
+                        p_mean = np.mean(profile)
+                        if p_mean > 0:
+                            profile = profile / p_mean
+                        kw_series = avg_kw * profile
+                        high_freq_list.extend(kw_series.tolist())
 
-                if monthly is None:
-                    st.error(f"❌ 在檔案中找不到 {year2} 年 ({MCO_YEAR_MAP[year2]}) 的【{loc2}】資料。")
+                    raw_history = high_freq_list
+                    st.success(f"✅ 成功將 {sel_year2} 年【{sel_loc2}】轉換為高頻序列 (共 {len(raw_history)} 筆)")
                 else:
-                    series_15 = monthly_to_15min(monthly, year2)
-                    if series_15 is None:
-                        st.error("❌ 有效的月份資料少於 2 個月，無法內插。")
-                    else:
-                        if pd.notna(ts_parsed) and series_15.index[0] <= ts_parsed <= series_15.index[-1]:
-                            series_15 = series_15[:ts_parsed]
-                        else:
-                            st.warning("⚠️ 指定的時間戳不在所選年份範圍內，將使用整年序列的最後 192 筆以上資料。")
-                        st.session_state.raw_history = series_15.tolist()
-                        st.session_state.history_source = f"Excel：{uploaded_excel.name} / {year2} / {loc2}（已內插為 15 分鐘）"
-                        st.success(f"✅ 已轉換為 15 分鐘序列，共 {len(series_15)} 筆。")
-            except ImportError:
-                st.error("❌ 讀取 .xls 需要 xlrd 套件，請在 requirements.txt 加入 xlrd，或改上傳 .xlsx。")
+                    st.warning("⚠️ 找不到對應年份與區域的數值。")
+
             except Exception as e:
-                st.error(f"❌ 解析 Excel 時發生錯誤: {str(e)}")
+                st.error(f"❌ Excel 轉換處理時發生錯誤: {str(e)}")
+
+    # 執行 AI 預測按鈕
+    st.markdown("---")
+    if st.button("🚀 開始執行 AI 預測與五大防禦檢核", type="primary"):
+        if not predictor.is_ready:
+            st.error(f"❌ 模型尚未就緒，無法進行預測。原因: {predictor.init_error}")
+        elif len(raw_history) == 0:
+            st.error("⚠️ 目前沒有可用的歷史負載資料，請先上傳檔案或完成資料轉換！")
+        else:
+            with st.spinner("正在進行五大防禦檢核與模型推論中..."):
+                history_input = [float(x) for x in raw_history]
+                result = predictor.forecast_load_kw(history_input, input_timestamp)
+
+            st.markdown("---")
+            st.subheader("📊 預測結果與系統稽核")
+
+            if result.get("ai_valid") == 1:
+                st.success("✅ 推論成功：資料完全合規，AI 模型正常預測！")
+                
+                pred_loads = result.get("forecast_load_kw") or result.get("forecast_load_kWh")
+                pred_times = result.get("prediction_timestamps")
+                
+                df_chart = pd.DataFrame({
+                    "預測時間": pd.to_datetime(pred_times),
+                    "AI 預測負載 (kW)": pred_loads
+                }).set_index("預測時間")
+
+                # 繪製論文級精緻圖表
+                fig, ax = plt.subplots(figsize=(12, 5))
+                ax.plot(
+                    df_chart.index, 
+                    df_chart['AI 預測負載 (kW)'], 
+                    color='crimson', 
+                    linewidth=1.8, 
+                    label='AI Forecast Load (AI 預測負載)'
+                )
+                ax.set_title('Full Test Set Load Forecasting Result', fontsize=14, fontweight='bold')
+                ax.set_xlabel('Test Timeline', fontsize=12)
+                ax.set_ylabel('Power Load (kW)', fontsize=12)
+                ax.grid(True, linestyle='--', alpha=0.5)
+                ax.legend(loc='upper right', fontsize=11)
+
+                fig.tight_layout()
+                st.pyplot(fig)
+                
+                with st.expander("查看詳細 96 步預測數據表格"):
+                    st.dataframe(df_chart)
+                    
+                csv_data = df_chart.to_csv().encode('utf-8')
+                st.download_button(
+                    label="📥 下載預測結果 CSV 檔案",
+                    data=csv_data,
+                    file_name="forecast_result.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.error("❌ 系統防禦機制已攔截！(ai_valid = 0)")
+                st.warning(f"**觸發錯誤原因**：{result.get('error_reason')}")
+                st.info(f"🛡️ **啟動備援策略 (Fallback)**：`{result.get('fallback_strategy')}`")
