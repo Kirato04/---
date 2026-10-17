@@ -176,6 +176,16 @@ with tab2:
     raw_history = []
     input_timestamp = st.text_input("指定資料截止時間戳 (Timestamp)", value="2026-06-07 12:00:00", key="pred_ts")
 
+    # 💡 新增：網端專用的自由選擇預測天數拉桿
+    forecast_days_choice = st.slider(
+        "選擇預測天數範圍 (Forecast Horizon)", 
+        min_value=1, 
+        max_value=7, 
+        value=1, 
+        step=1,
+        help="可自由選擇在網頁上預測未來 1 天到 7 天的用電趨勢（實機預設或 API 呼叫時仍可維持單日傳輸）"
+    )
+
     if file_type_choice == "高頻 CSV 檔案":
         uploaded_csv = st.file_uploader("請上傳包含 15 分鐘高頻歷史用電的 CSV 檔案", type=["csv"], key="pred_csv_uploader")
         if uploaded_csv is not None:
@@ -272,9 +282,10 @@ with tab2:
         elif len(raw_history) == 0:
             st.error("⚠️ 目前沒有可用的歷史負載資料，請先上傳檔案或完成資料轉換！")
         else:
-            with st.spinner("正在進行五大防禦檢核與模型推論中..."):
+            with st.spinner(f"正在進行未來 {forecast_days_choice} 天的五大防禦檢核與模型推論中..."):
                 history_input = [float(x) for x in raw_history]
-                result = predictor.forecast_load_kw(history_input, input_timestamp)
+                # 傳入網頁上選擇的天數參數，讓 infer.py 根據需求執行單日或滾動預測
+                result = predictor.forecast_load_kw(history_input, input_timestamp, forecast_days=forecast_days_choice)
 
             st.markdown("---")
             st.subheader("📊 預測結果與系統稽核")
@@ -297,9 +308,9 @@ with tab2:
                     df_chart['AI 預測負載 (kW)'], 
                     color='crimson', 
                     linewidth=1.8, 
-                    label='AI Forecast Load (AI 預測負載)'
+                    label=f'AI Forecast Load ({forecast_days_choice}-Day Horizon)'
                 )
-                ax.set_title('Full Test Set Load Forecasting Result', fontsize=14, fontweight='bold')
+                ax.set_title(f'Multi-Step Load Forecasting Result ({forecast_days_choice} Days)', fontsize=14, fontweight='bold')
                 ax.set_xlabel('Test Timeline', fontsize=12)
                 ax.set_ylabel('Power Load (kW)', fontsize=12)
                 ax.grid(True, linestyle='--', alpha=0.5)
@@ -308,17 +319,17 @@ with tab2:
                 fig.tight_layout()
                 st.pyplot(fig)
                 
-                with st.expander("查看詳細 96 步預測數據表格"):
+                with st.expander(f"查看詳細 {len(pred_loads)} 步預測數據表格"):
                     st.dataframe(df_chart)
                     
                 csv_data = df_chart.to_csv().encode('utf-8')
                 st.download_button(
                     label="📥 下載預測結果 CSV 檔案",
                     data=csv_data,
-                    file_name="forecast_result.csv",
+                    file_name=f"forecast_result_{forecast_days_choice}days.csv",
                     mime="text/csv",
                 )
             else:
                 st.error("❌ 系統防禦機制已攔截！(ai_valid = 0)")
-                st.warning(f"**觸發錯誤原因**：{result.get('error_reason')}")
+                st.warning(f"**觸發錯誤原因**：©{result.get('error_reason')}")
                 st.info(f"🛡️ **啟動備援策略 (Fallback)**：`{result.get('fallback_strategy')}`")
