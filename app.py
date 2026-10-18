@@ -185,15 +185,22 @@ with tab2:
         if uploaded_csv is not None:
             try:
                 df_uploaded = pd.read_csv(uploaded_csv)
+                
+                # 💡 關鍵修正：自動偵測並解析 CSV 中的 Timestamp 欄位作為真實時間索引
+                if 'Timestamp' in df_uploaded.columns:
+                    df_uploaded['Timestamp'] = pd.to_datetime(df_uploaded['Timestamp'])
+                    df_uploaded = df_uploaded.set_index('Timestamp')
+                    
                 numeric_columns = df_uploaded.select_dtypes(include=[np.number]).columns.tolist()
                 if numeric_columns:
                     selected_col = st.selectbox("請選擇代表負載數值 (kW) 的欄位名稱", numeric_columns, key="pred_col_csv")
-                    csv_data = df_uploaded[selected_col].dropna().values
+                    series_data = df_uploaded[selected_col].dropna()
                     
-                    csv_index = pd.date_range(start='2024-01-01 00:00:00+08:00', periods=len(csv_data), freq='15min')
-                    st.session_state['active_history_series'] = pd.Series(csv_data, index=csv_index)
-                    st.session_state['current_data_year'] = 2024
-                    st.success(f"✅ 成功讀取 CSV 並載入記憶體 (共 {len(csv_data)} 筆)")
+                    # 存入 session_state，並記錄該資料的實際年份與起訖範圍
+                    st.session_state['active_history_series'] = series_data
+                    st.session_state['current_data_year'] = series_data.index.min().year
+                    
+                    st.success(f"✅ 成功讀取 CSV 並載入記憶體 (共 {len(series_data)} 筆，區間: {series_data.index.min().strftime('%Y-%m-%d')} ~ {series_data.index.max().strftime('%Y-%m-%d')})")
             except Exception as e:
                 st.error(f"❌ 讀取 CSV 發生錯誤: {str(e)}")
         else:
