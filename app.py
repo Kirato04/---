@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 import calendar
 from infer import EMSLoadPredictor
 
-# 設定網頁標題與排版
 st.set_page_config(page_title="微電網 AI 預測與分析系統", layout="wide")
 st.title("⚡ 微電網 EMS 智慧用電分析與 AI 預測平台")
 st.markdown("結合**校園長短期用電統計分析**與 **LSTM 五大防禦即時預測**。")
@@ -20,7 +19,6 @@ def load_predictor():
 
 predictor = load_predictor()
 
-# 側邊欄：系統狀態檢視
 st.sidebar.header("🛡️ 系統防禦與狀態")
 if predictor.is_ready:
     st.sidebar.success("✅ AI 模型與防禦引擎已就緒")
@@ -31,15 +29,11 @@ if predictor.is_ready:
 else:
     st.sidebar.error(f"❌ 錯誤: {predictor.init_error}")
 
-# 建立功能頁籤 (Tabs)
 tab1, tab2 = st.tabs([
     "📈 1. 歷史用電統計與動態趨勢分析", 
     "🚀 2. 即時歷史負載上傳與 AI 預測系統 "
 ])
 
-# -------------------------------------------------------------------------
-# 頁籤一：歷史用電統計與動態分析
-# -------------------------------------------------------------------------
 with tab1:
     st.header("📈 歷史用電統計與動態趨勢分析")
     
@@ -158,10 +152,6 @@ with tab1:
     else:
         st.info("💡 請先上傳您的電度電費 Excel 統計檔案，即可檢視月統計與趨勢圖。")
 
-
-# -------------------------------------------------------------------------
-# 頁籤二：即時歷史負載上傳與 AI 預測系統
-# -------------------------------------------------------------------------
 with tab2:
     st.header("🚀 即時歷史負載上傳與 AI 預測系統")
     
@@ -174,14 +164,45 @@ with tab2:
 
     file_type_choice = st.radio("請選擇您要上傳的檔案類型進行預測：", ["高頻 CSV 檔案", "長短期 Excel 統計檔案 "], horizontal=True)
 
-    if 'active_history_series' not in
+    if 'active_history_series' not in st.session_state:
+        st.session_state['active_history_series'] = None
+    if 'current_data_year' not in st.session_state:
+        st.session_state['current_data_year'] = 2024
+
+    if file_type_choice == "高頻 CSV 檔案":
+        uploaded_csv = st.file_uploader("請上傳包含 15 分鐘高頻歷史用電的 CSV 檔案", type=["csv"], key="pred_csv_uploader")
+        if uploaded_csv is not None:
+            try:
+                df_uploaded = pd.read_csv(uploaded_csv)
+                
+                if 'Timestamp' in df_uploaded.columns:
+                    df_uploaded['Timestamp'] = pd.to_datetime(df_uploaded['Timestamp']).dt.tz_localize(None)
+                    df_uploaded = df_uploaded.set_index('Timestamp')
+                
+                numeric_columns = df_uploaded.select_dtypes(include=[np.number]).columns.tolist()
+                if numeric_columns:
+                    selected_col = st.selectbox("請選擇代表負載數值 (kW) 的欄位名稱", numeric_columns, key="pred_col_csv")
+                    series_data = df_uploaded[selected_col].dropna()
+                    
+                    st.session_state['active_history_series'] = series_data
+                    st.session_state['current_data_year'] = series_data.index.min().year
+                    
+                    st.success(f"✅ 成功讀取 CSV 並載入記憶體 (共 {len(series_data)} 筆，區間: {series_data.index.min().strftime('%Y-%m-%d')} ~ {series_data.index.max().strftime('%Y-%m-%d')})")
+            except Exception as e:
+                st.error(f"❌ 讀取 CSV 發生錯誤: {str(e)}")
+        else:
+            if st.button("📥 載入內建範例測試資料 (CSV 格式)"):
+                sample_data = np.linspace(500, 800, 200)
+                sample_index = pd.date_range(start='2024-01-01 00:00:00', periods=len(sample_data), freq='15min')
+                st.session_state['active_history_series'] = pd.Series(sample_data, index=sample_index)
+                st.session_state['current_data_year'] = 2024
+                st.success(f"已載入內建範例數據（共 {len(sample_data)} 筆）")
 
     else:
         uploaded_excel_tab2 = st.file_uploader("請上傳您的電度電費 Excel 統計檔案 (.xlsx)", type=["xlsx", "xls"], key="pred_excel_uploader")
         
         if uploaded_excel_tab2 is not None:
             try:
-                # 預設先用 2024 年，等讀到工作表後自動對應
                 sel_year2 = 2024
 
                 xls2 = pd.ExcelFile(uploaded_excel_tab2)
@@ -190,7 +211,6 @@ with tab2:
                 
                 df_excel2 = pd.read_excel(uploaded_excel_tab2, sheet_name=sheet_to_use2, header=None)
                 
-                # 讓使用者選擇分析的年份
                 selected_excel_year = st.selectbox("選擇轉換與預測的西元年份", [2018, 2019, 2020, 2021, 2022, 2023, 2024], index=6, key="excel_pred_year")
                 sel_year2 = selected_excel_year
                 st.session_state['current_data_year'] = sel_year2
@@ -216,7 +236,7 @@ with tab2:
                 else:
                     cur_block = None
                     for idx, row in df_excel2.iterrows():
-                        val = str(row.iloc[0].strip() if pd.notna(row.iloc[0]) else "")
+                        val = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ""
                         if t_mco2 in val and '度數' not in val and '費用' not in val:
                             cur_block = t_mco2
                             continue
@@ -245,8 +265,9 @@ with tab2:
                         kw_series = avg_kw * profile
                         high_freq_list.extend(kw_series.tolist())
 
-                    full_time_index = pd.date_range(start=f'{sel_year2}-01-01 00:00:00+08:00', periods=len(high_freq_list), freq='15min')
-                    st.session_state['active_history_series'] = pd.Series(high_freq_list, index=full_time_index)
+                    full_time_index = pd.date_range(start=f'{sel_year2}-01-01 00:00:00', periods=len(high_freq_list), freq='15min')
+                    series_data = pd.Series(high_freq_list, index=full_time_index)
+                    st.session_state['active_history_series'] = series_data
                     st.success(f"✅ 成功將 {sel_year2} 年【{sel_loc2}】轉換為高頻序列並快取 (共 {len(high_freq_list)} 筆)")
                 else:
                     st.warning(f"⚠️ 在檔案中找不到 {sel_year2} 年 ({t_mco2}) 對應的【{sel_loc2}】數值。")
@@ -254,17 +275,14 @@ with tab2:
             except Exception as e:
                 st.error(f"❌ Excel 轉換處理時發生錯誤: {str(e)}")
 
-    # -------------------------------------------------------------
-    # ⏱️ 設定預測截止時間點 (嚴格依據實際資料範圍)
-    # -------------------------------------------------------------
     st.markdown("---")
     st.subheader("⏱️ 設定預測截止時間點")
     
-    if st.session_state.get('active_history_series') is not None and len(st.session_state['active_history_series']) > 0:
+    if st.session_state['active_history_series'] is not None and len(st.session_state['active_history_series']) > 0:
         full_series = st.session_state['active_history_series']
         min_date = full_series.index.min().date()
         max_date = full_series.index.max().date()
-        default_date = max_date  # 預設指向資料最後一天
+        default_date = max_date
 
         col_d, col_t = st.columns(2)
         with col_d:
@@ -273,7 +291,7 @@ with tab2:
                 value=default_date,
                 min_value=min_date,
                 max_value=max_date,
-                help=f"已嚴格限制在資料區間內 ({min_date} ~ {max_date})"
+                help=f"已嚴格限制在資料實際區間內 ({min_date} ~ {max_date})"
             )
         with col_t:
             selected_time = st.time_input(
@@ -283,82 +301,79 @@ with tab2:
             )
 
         input_timestamp = f"{selected_date} {selected_time}"
-    else:
-        st.warning("⚠️ 尚未偵測到有效的歷史負載資料，請先在上上方完成檔案上傳或載入範例，才能設定預測時間點。")
-        input_timestamp = None
-
-    # 執行 AI 預測按鈕
-    st.markdown("---")
-    if st.button("🚀 開始執行單日 AI 預測與五大防禦檢核", type="primary"):
-        if not predictor.is_ready:
-            st.error(f"❌ 模型尚未就緒，無法進行預測。原因: {predictor.init_error}")
-        elif st.session_state['active_history_series'] is None:
-            st.error("⚠️ 目前沒有可用的歷史負載資料，請先上傳檔案或載入範例！")
-        else:
-            try:
-                with st.spinner("正在進行單日五大防禦檢核與模型推論中..."):
-                    
-                    parsed_input_dt = pd.to_datetime(input_timestamp)
-                    if parsed_input_dt.tzinfo is None:
-                        parsed_input_dt = parsed_input_dt.tz_localize('Asia/Taipei')
-                    
-                    full_series = st.session_state['active_history_series']
-                    
-                    sliced_history = full_series[full_series.index <= parsed_input_dt]
-                    
-                    if len(sliced_history) >= predictor.lookback_steps:
-                        history_input = sliced_history.iloc[-predictor.lookback_steps:].tolist()
-                    else:
-                        st.warning("⚠️ 指定的時間戳之前資料量不足 192 筆，已自動取序列前 192 筆。")
-                        history_input = full_series.iloc[:predictor.lookback_steps].tolist()
-
-                    result = predictor.forecast_load_kw(history_input, input_timestamp, forecast_days=1)
-
-                st.markdown("---")
-                st.subheader("📊 單日預測結果與系統稽核")
-
-                if result and result.get("ai_valid") == 1:
-                    st.success("✅ 推論成功：資料完全合規，AI 模型正常預測！")
-                    
-                    pred_loads = result.get("forecast_load_kw") or result.get("forecast_load_kWh")
-                    pred_times = result.get("prediction_timestamps")
-                    
-                    df_chart = pd.DataFrame({
-                        "預測時間": pd.to_datetime(pred_times),
-                        "AI 預測負載 (kW)": pred_loads
-                    }).set_index("預測時間")
-
-                    fig, ax = plt.subplots(figsize=(12, 5))
-                    ax.plot(
-                        df_chart.index, 
-                        df_chart['AI 預測負載 (kW)'], 
-                        color='crimson', 
-                        linewidth=1.8, 
-                        label='AI Forecast Load (1-Day Horizon)'
-                    )
-                    ax.set_title(f'Load Forecasting Result (Up to {input_timestamp})', fontsize=14, fontweight='bold')
-                    ax.set_xlabel('Test Timeline (15-min Intervals)', fontsize=12)
-                    ax.set_ylabel('Power Load (kW)', fontsize=12)
-                    ax.grid(True, linestyle='--', alpha=0.5)
-                    ax.legend(loc='upper right', fontsize=11)
-
-                    fig.tight_layout()
-                    st.pyplot(fig)
-                    
-                    with st.expander("查看詳細 96 步預測數據表格"):
-                        st.dataframe(df_chart)
+        
+        st.markdown("---")
+        if st.button("🚀 開始執行單日 AI 預測與五大防禦檢核", type="primary"):
+            if not predictor.is_ready:
+                st.error(f"❌ 模型尚未就緒，無法進行預測。原因: {predictor.init_error}")
+            else:
+                try:
+                    with st.spinner("正在進行單日五大防禦檢核與模型推論中..."):
                         
-                    csv_data = df_chart.to_csv().encode('utf-8')
-                    st.download_button(
-                        label="📥 下載預測結果 CSV 檔案",
-                        data=csv_data,
-                        file_name="forecast_result_1day.csv",
-                        mime="text/css",
-                    )
-                else:
-                    st.error("❌ 系統防禦機制已攔截！(ai_valid = 0)")
-                    st.warning(f"**觸發錯誤原因**：{result.get('error_reason')}")
-                    st.info(f"🛡️ **啟動備援策略 (Fallback)**：`{result.get('fallback_strategy')}`")
+                        parsed_input_dt = pd.to_datetime(input_timestamp)
+                        if parsed_input_dt.tzinfo is not None:
+                            parsed_input_dt = parsed_input_dt.tz_localize(None)
+                        
+                        if full_series.index.tz is not None:
+                            full_series.index = full_series.index.tz_localize(None)
+                        
+                        sliced_history = full_series[full_series.index <= parsed_input_dt]
+                        
+                        if len(sliced_history) >= predictor.lookback_steps:
+                            history_input = sliced_history.iloc[-predictor.lookback_steps:].tolist()
+                        else:
+                            st.warning("⚠️ 指定的時間戳之前資料量不足 192 筆，已自動取序列前 192 筆。")
+                            history_input = full_series.iloc[:predictor.lookback_steps].tolist()
 
-            except Exception as e:
-                st.error(f"❌ 執行預測過程發生例外錯誤: {str(e)}")
+                        result = predictor.forecast_load_kw(history_input, input_timestamp, forecast_days=1)
+
+                    st.markdown("---")
+                    st.subheader("📊 單日預測結果與系統稽核")
+
+                    if result and result.get("ai_valid") == 1:
+                        st.success("✅ 推論成功：資料完全合規，AI 模型正常預測！")
+                        
+                        pred_loads = result.get("forecast_load_kw") or result.get("forecast_load_kWh")
+                        pred_times = result.get("prediction_timestamps")
+                        
+                        df_chart = pd.DataFrame({
+                            "預測時間": pd.to_datetime(pred_times),
+                            "AI 預測負載 (kW)": pred_loads
+                        }).set_index("預測時間")
+
+                        fig, ax = plt.subplots(figsize=(12, 5))
+                        ax.plot(
+                            df_chart.index, 
+                            df_chart['AI 預測負載 (kW)'], 
+                            color='crimson', 
+                            linewidth=1.8, 
+                            label='AI Forecast Load (1-Day Horizon)'
+                        )
+                        ax.set_title(f'Load Forecasting Result (Up to {input_timestamp})', fontsize=14, fontweight='bold')
+                        ax.set_xlabel('Test Timeline (15-min Intervals)', fontsize=12)
+                        ax.set_ylabel('Power Load (kW)', fontsize=12)
+                        ax.grid(True, linestyle='--', alpha=0.5)
+                        ax.legend(loc='upper right', fontsize=11)
+
+                        fig.tight_layout()
+                        st.pyplot(fig)
+                        
+                        with st.expander("查看詳細 96 步預測數據表格"):
+                            st.dataframe(df_chart)
+                            
+                        csv_data = df_chart.to_csv().encode('utf-8')
+                        st.download_button(
+                            label="📥 下載預測結果 CSV 檔案",
+                            data=csv_data,
+                            file_name="forecast_result_1day.csv",
+                            mime="text/csv",
+                        )
+                    else:
+                        st.error("❌ 系統防禦機制已攔截！(ai_valid = 0)")
+                        st.warning(f"**觸發錯誤原因**：{result.get('error_reason')}")
+                        st.info(f"🛡️ **啟動備援策略 (Fallback)**：`{result.get('fallback_strategy')}`")
+
+                except Exception as e:
+                    st.error(f"❌ 執行預測過程發生例外錯誤: {str(e)}")
+    else:
+        st.info("💡 請先在上方的檔案上傳區完成 CSV 或 Excel 檔案載入，即可設定預測時間點並執行 AI 模型。")
