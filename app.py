@@ -302,21 +302,19 @@ with tab2:
                     if parsed_input_dt.tzinfo is None:
                         parsed_input_dt = parsed_input_dt.tz_localize('Asia/Taipei')
                     
-                    # 從 session 或現場重建時間序列並進行嚴格的時間切片
-                    if 'df_temp_history' in st.session_state:
-                        df_temp_history = st.session_state['df_temp_history']
-                    else:
-                        sel_year_for_index = parsed_input_dt.year
-                        full_time_index = pd.date_range(start=f'{sel_year_for_index}-01-01 00:00:00+08:00', periods=len(raw_history), freq='15min')
-                        df_temp_history = pd.Series(raw_history, index=full_time_index)
+                    # 建立完整時間序列
+                    sel_year_for_index = parsed_input_dt.year
+                    full_time_index = pd.date_range(start=f'{sel_year_for_index}-01-01 00:00:00+08:00', periods=len(raw_history), freq='15min')
+                    df_temp_history = pd.Series(raw_history, index=full_time_index)
                     
-                    # 嚴格切出該時間戳之前的歷史資料（作為 Lookback 視窗）
+                    # 嚴格切出該時間戳「之前」的所有資料
                     sliced_history = df_temp_history[df_temp_history.index <= parsed_input_dt]
                     
+                    # 💡 關鍵：如果切出來的資料大於 192 筆，我們精準取其「最後 192 筆」作為當下的 Lookback 視窗！
                     if len(sliced_history) >= predictor.lookback_steps:
-                        history_input = sliced_history.tolist()
+                        history_input = sliced_history.iloc[-predictor.lookback_steps:].tolist()
                     else:
-                        st.warning("⚠️ 指定的時間戳之前資料量不足 192 筆，已自動取前 192 筆進行預測。")
+                        st.warning("⚠️ 指定的時間戳之前資料量不足 192 筆，已自動取該年度前 192 筆資料。")
                         history_input = raw_history[:predictor.lookback_steps]
 
                     # 呼叫推論引擎
@@ -362,7 +360,7 @@ with tab2:
                         label="📥 下載預測結果 CSV 檔案",
                         data=csv_data,
                         file_name=f"forecast_result_{forecast_days_choice}days.csv",
-                        mime="text/css" if False else "text/csv",
+                        mime="text/csv",
                     )
                 else:
                     st.error("❌ 系統防禦機制已攔截！(ai_valid = 0)")
