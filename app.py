@@ -283,30 +283,40 @@ with tab2:
                 st.error(f"❌ Excel 轉換處理時發生錯誤: {str(e)}")
 
     # -------------------------------------------------------------
-    # 💡 改良：使用「日期與時間選擇器」取代純文字輸入，防止超出範圍
+    # ⏱️ 設定預測截止時間點 (範圍自動限制為資料實際區間)
     # -------------------------------------------------------------
     st.markdown("---")
     st.subheader("⏱️ 設定預測截止時間點")
     
-    current_year = st.session_state.get('current_data_year', 2024)
-    
+    # 動態抓取目前已載入資料的時間範圍作為上下限
+    if st.session_state['active_history_series'] is not None:
+        full_series = st.session_state['active_history_series']
+        min_date = full_series.index.min().date()
+        max_date = full_series.index.max().date()
+        default_date = max_date  # 預設直接指向資料的最後一天
+    else:
+        # 若尚未上傳檔案，給予預設安全範圍
+        current_year = st.session_state.get('current_data_year', 2024)
+        min_date = pd.to_datetime(f"{current_year}-01-01").date()
+        max_date = pd.to_datetime(f"{current_year}-12-31").date()
+        default_date = min_date
+
     col_d, col_t = st.columns(2)
     with col_d:
         selected_date = st.date_input(
             "選擇預測基準日期", 
-            value=pd.to_datetime(f"{current_year}-06-07").date(),
-            min_value=pd.to_datetime(f"{current_year}-01-01").date(),
-            max_value=pd.to_datetime(f"{current_year}-12-31").date(),
-            help=f"可選擇 {current_year} 年內的任意有效日期"
+            value=default_date,
+            min_value=min_date,
+            max_value=max_date,
+            help=f"已自動限制在資料區間內 ({min_date} ~ {max_date})"
         )
     with col_t:
         selected_time = st.time_input(
             "選擇預測基準時間", 
-            value=pd.to_datetime("12:00:00").time(),
+            value=pd.to_datetime("00:00:00").time(),
             help="選擇當天的小時與分鐘"
         )
 
-    # 組合為標準時間戳字串
     input_timestamp = f"{selected_date} {selected_time}"
 
     # 執行 AI 預測按鈕
