@@ -171,7 +171,7 @@ with tab2:
           2. **Excel 檔案**：上傳後選擇大樓，系統會**自動根據你輸入的時間戳年份**轉換為 15 分鐘高頻序列供 AI 預測！
         """)
 
-    file_type_choice = st.radio("請選擇您要上傳的檔案類型進行預測：", ["高頻 CSV 檔案", "長短期 Excel 統計檔案 (自動轉高頻)"], horizontal=True)
+    file_type_choice = st.radio("請選擇您要上傳的檔案類型進行預測：", ["高頻 CSV 檔案", "長短期 Excel 統計檔案 "], horizontal=True)
 
     raw_history = []
     
