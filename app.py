@@ -43,7 +43,7 @@ tab1, tab2 = st.tabs([
 with tab1:
     st.header("📈 歷史用電統計與動態趨勢分析")
     
-    with st.expander("📌 點此查看【歷史統計檔案】的規格與欄位說明（必讀）", expanded=False):
+    with st.expander("📌 點此查看【歷史統計檔案】的規格與欄位說明", expanded=False):
         st.markdown("""
         * **檔案格式**：Excel 試算表（`.xlsx` 或 `.xls`）。
         * **工作表名稱（Sheet）**：需包含各月份用電度數彙整表（例如 `107-113各月度數費用合併`）。
@@ -160,69 +160,49 @@ with tab1:
 
 
 # -------------------------------------------------------------------------
-# 共用函式：月用電量 (kWh) -> 15 分鐘高頻功率序列 (kW)
-# -------------------------------------------------------------------------
-def build_high_freq_from_monthly(monthly_kwh, year, weekend_factor=0.85, day_std=0.04, noise_std=0.01):
-    """
-    以「月度數」為能量基準，合成 15 分鐘高頻序列：
-      日內曲線 (正弦) x 週末係數 x 逐日隨機係數 x 微量雜訊，
-      再於每月內正規化，確保每月總度數與原 Excel 完全一致。
-    亂數種子固定為年份，因此同一年份的結果可重現。
-    """
-    rng = np.random.default_rng(int(year))
-    out = []
-    for m_idx, m_kwh in enumerate(monthly_kwh, start=1):
-        m_kwh = 0.0 if pd.isna(m_kwh) else float(m_kwh)
-        days = calendar.monthrange(year, m_idx)[1]
-        n = days * 96
-        steps = np.arange(n)
-        hour = (steps % 96) * 0.25
-        daily = np.clip(1.0 + 0.3 * np.sin(2 * np.pi * (hour - 6) / 24), 0.4, 1.6)
-        dow = (pd.Timestamp(year, m_idx, 1) + pd.to_timedelta(steps // 96, unit="D")).dayofweek.values
-        week = np.where(dow >= 5, weekend_factor, 1.0)
-        day_f = np.repeat(1.0 + rng.normal(0, day_std, days), 96)
-        noise = 1.0 + rng.normal(0, noise_std, n)
-        shape = daily * week * day_f * noise
-        shape = shape / shape.mean()
-        out.extend((m_kwh / (days * 24.0) * shape).tolist())
-    return out
-
-# -------------------------------------------------------------------------
-# 頁籤二：即時歷史負載上傳與 AI 預測系統 (支援 Excel 自動轉換)
+# 頁籤二：即時歷史負載上傳與 AI 預測系統
 # -------------------------------------------------------------------------
 with tab2:
-    st.header("🚀 即時歷史負載上傳與 AI 預測系統 (支援 Excel 自動轉換)")
+    st.header("🚀 即時歷史負載上傳與 AI 預測系統")
     
-    with st.expander("📌 點此查看【預測檔案】格式與轉換說明（必讀）", expanded=False):
+    with st.expander("📌 點此查看【預測檔案】格式與轉換說明", expanded=False):
         st.markdown("""
         * **支援檔案格式**：
           1. **CSV 檔案**：傳統高頻 15 分鐘負載數據（需至少 192 筆以上）。
-          2. **Excel 檔案**：上傳後系統會自動根據你輸入的時間戳年份轉換為 15 分鐘高頻序列供 AI 預測！
+          2. **Excel 檔案**：上傳後系統會自動轉換為完整年度高頻序列，並根據你輸入的時間戳自動切片預測！
         """)
 
     file_type_choice = st.radio("請選擇您要上傳的檔案類型進行預測：", ["高頻 CSV 檔案", "長短期 Excel 統計檔案 (自動轉高頻)"], horizontal=True)
 
-    raw_history = []
-    
     # 輸入截止時間戳
     input_timestamp = st.text_input("指定資料截止時間戳 (Timestamp)", value="2024-06-07 12:00:00", key="pred_ts")
+
+    # 確保 session_state 存放資料
+    if 'active_history_series' not in st.session_state:
+        st.session_state['active_history_series'] = None
 
     if file_type_choice == "高頻 CSV 檔案":
         uploaded_csv = st.file_uploader("請上傳包含 15 分鐘高頻歷史用電的 CSV 檔案", type=["csv"], key="pred_csv_uploader")
         if uploaded_csv is not None:
             try:
                 df_uploaded = pd.read_csv(uploaded_csv)
-                st.success(f"✅ 成功讀取 CSV：{uploaded_csv.name} (共 {len(df_uploaded)} 筆資料)")
                 numeric_columns = df_uploaded.select_dtypes(include=[np.number]).columns.tolist()
                 if numeric_columns:
                     selected_col = st.selectbox("請選擇代表負載數值 (kW) 的欄位名稱", numeric_columns, key="pred_col_csv")
-                    raw_history = df_uploaded[selected_col].dropna().tolist()
+                    csv_data = df_uploaded[selected_col].dropna().values
+                    
+                    # 建立預設時間索引並存入 session_state
+                    csv_index = pd.date_range(start='2024-01-01 00:00:00+08:00', periods=len(csv_data), freq='15min')
+                    st.session_state['active_history_series'] = pd.Series(csv_data, index=csv_index)
+                    st.success(f"✅ 成功讀取 CSV 並載入記憶體 (共 {len(csv_data)} 筆)")
             except Exception as e:
                 st.error(f"❌ 讀取 CSV 發生錯誤: {str(e)}")
         else:
             if st.button("📥 載入內建範例測試資料 (CSV 格式)"):
-                raw_history = np.linspace(500, 800, 200).tolist()
-                st.success(f"已載入內建範例數據（共 {len(raw_history)} 筆）")
+                sample_data = np.linspace(500, 800, 200)
+                sample_index = pd.date_range(start='2024-01-01 00:00:00+08:00', periods=len(sample_data), freq='15min')
+                st.session_state['active_history_series'] = pd.Series(sample_data, index=sample_index)
+                st.success(f"已載入內建範例數據（共 {len(sample_data)} 筆）")
 
     else:
         uploaded_excel_tab2 = st.file_uploader("請上傳您的電度電費 Excel 統計檔案 (.xlsx)", type=["xlsx", "xls"], key="pred_excel_uploader")
@@ -230,10 +210,7 @@ with tab2:
         if uploaded_excel_tab2 is not None:
             try:
                 parsed_input_dt = pd.to_datetime(input_timestamp)
-                if pd.isna(parsed_input_dt):
-                    sel_year2 = 2024
-                else:
-                    sel_year2 = parsed_input_dt.year
+                sel_year2 = 2024 if pd.isna(parsed_input_dt) else parsed_input_dt.year
 
                 xls2 = pd.ExcelFile(uploaded_excel_tab2)
                 default_sheet2 = '107-113各月度數費用合併' if '107-113各月度數費用合併' in xls2.sheet_names else xls2.sheet_names[0]
@@ -275,8 +252,7 @@ with tab2:
                 if target_data2 is not None:
                     high_freq_list = []
                     for m_idx, m_kwh in enumerate(target_data2, start=1):
-                        if pd.isna(m_kwh):
-                            m_kwh = 0.0
+                        m_kwh = 0.0 if pd.isna(m_kwh) else float(m_kwh)
                         days_in_m = calendar.monthrange(sel_year2, m_idx)[1]
                         intervals = days_in_m * 96
                         day_idx = np.arange(intervals)
@@ -292,25 +268,23 @@ with tab2:
                         kw_series = avg_kw * profile
                         high_freq_list.extend(kw_series.tolist())
 
-                    raw_history = high_freq_list
-                    
-                    full_time_index = pd.date_range(start=f'{sel_year2}-01-01 00:00:00+08:00', periods=len(raw_history), freq='15min')
-                    st.session_state['df_temp_history'] = pd.Series(raw_history, index=full_time_index)
-                    
-                    st.success(f"✅ 成功將 {sel_year2} 年【{sel_loc2}】轉換為高頻序列 (共 {len(raw_history)} 筆)")
+                    # 建立完整年度時間序列並存入 session_state
+                    full_time_index = pd.date_range(start=f'{sel_year2}-01-01 00:00:00+08:00', periods=len(high_freq_list), freq='15min')
+                    st.session_state['active_history_series'] = pd.Series(high_freq_list, index=full_time_index)
+                    st.success(f"✅ 成功將 {sel_year2} 年【{sel_loc2}】轉換為高頻序列並快取 (共 {len(high_freq_list)} 筆)")
                 else:
                     st.warning(f"⚠️ 在檔案中找不到 {sel_year2} 年 ({t_mco2}) 對應的【{sel_loc2}】數值。")
 
             except Exception as e:
                 st.error(f"❌ Excel 轉換處理時發生錯誤: {str(e)}")
 
-    # 執行 AI 預測按鈕 (固定為單日 96 步推論)
+    # 執行 AI 預測按鈕
     st.markdown("---")
     if st.button("🚀 開始執行單日 AI 預測與五大防禦檢核", type="primary"):
         if not predictor.is_ready:
             st.error(f"❌ 模型尚未就緒，無法進行預測。原因: {predictor.init_error}")
-        elif len(raw_history) == 0:
-            st.error("⚠️ 目前沒有可用的歷史負載資料，請先上傳檔案或完成資料轉換！")
+        elif st.session_state['active_history_series'] is None:
+            st.error("⚠️ 目前沒有可用的歷史負載資料，請先上傳檔案或載入範例！")
         else:
             try:
                 with st.spinner("正在進行單日五大防禦檢核與模型推論中..."):
@@ -319,22 +293,19 @@ with tab2:
                     if parsed_input_dt.tzinfo is None:
                         parsed_input_dt = parsed_input_dt.tz_localize('Asia/Taipei')
                     
-                    if 'df_temp_history' in st.session_state:
-                        df_temp_history = st.session_state['df_temp_history']
-                    else:
-                        sel_year_for_index = parsed_input_dt.year
-                        full_time_index = pd.date_range(start=f'{sel_year_for_index}-01-01 00:00:00+08:00', periods=len(raw_history), freq='15min')
-                        df_temp_history = pd.Series(raw_history, index=full_time_index)
+                    # 從 session_state 取出常駐的歷史資料序列
+                    full_series = st.session_state['active_history_series']
                     
-                    # 抓取該時間點之前的歷史資料
-                    sliced_history = df_temp_history[df_temp_history.index <= parsed_input_dt]
+                    # 💡 關鍵：精準根據使用者輸入的時間戳進行切片（只取該時間點之前的資料）
+                    sliced_history = full_series[full_series.index <= parsed_input_dt]
                     
                     if len(sliced_history) >= predictor.lookback_steps:
                         history_input = sliced_history.iloc[-predictor.lookback_steps:].tolist()
                     else:
-                        history_input = raw_history[:predictor.lookback_steps]
+                        st.warning("⚠️ 指定的時間戳之前資料量不足 192 筆，已自動取序列前 192 筆。")
+                        history_input = full_series.iloc[:predictor.lookback_steps].tolist()
 
-                    # 呼叫推論引擎 (固定預測單日，forecast_days=1)
+                    # 呼叫推論引擎
                     result = predictor.forecast_load_kw(history_input, input_timestamp, forecast_days=1)
 
                 st.markdown("---")
@@ -351,7 +322,7 @@ with tab2:
                         "AI 預測負載 (kW)": pred_loads
                     }).set_index("預測時間")
 
-                    # 繪製單日精緻圖表
+                    # 繪製圖表
                     fig, ax = plt.subplots(figsize=(12, 5))
                     ax.plot(
                         df_chart.index, 
@@ -360,7 +331,7 @@ with tab2:
                         linewidth=1.8, 
                         label='AI Forecast Load (1-Day Horizon)'
                     )
-                    ax.set_title('Single-Day Load Forecasting Result (24 Hours)', fontsize=14, fontweight='bold')
+                    ax.set_title(f'Load Forecasting Result (Up to {input_timestamp})', fontsize=14, fontweight='bold')
                     ax.set_xlabel('Test Timeline (15-min Intervals)', fontsize=12)
                     ax.set_ylabel('Power Load (kW)', fontsize=12)
                     ax.grid(True, linestyle='--', alpha=0.5)
