@@ -209,7 +209,6 @@ with tab2:
         
         if uploaded_excel_tab2 is not None:
             try:
-                # 💡 核心改良：直接從使用者輸入的時間戳自動解析年份！
                 parsed_input_dt = pd.to_datetime(input_timestamp)
                 if pd.isna(parsed_input_dt):
                     st.error("❌ 時間戳格式錯誤，請確保格式如：2024-06-07 12:00:00")
@@ -223,14 +222,11 @@ with tab2:
                 
                 df_excel2 = pd.read_excel(uploaded_excel_tab2, sheet_name=sheet_to_use2, header=None)
                 
-                # 西元年對應民國年對照表
                 mco_map2 = {2018: '107年', 2019: '108年', 2020: '109年', 2021: '110年', 2022: '111年', 2023: '112年', 2024: '113年'}
-                t_mco2 = mco_map2.get(sel_year2, '113年') # 若超出範圍預設用 113年
+                t_mco2 = mco_map2.get(sel_year2, '113年')
 
                 loc_opts2 = ['不分區 (全校總用電)', '行政區', '商學', '校友', '男', '女', '中科', '文創']
                 sel_loc2 = st.selectbox("選擇轉換大樓/區域", loc_opts2, key="conv_loc")
-
-                st.info(f"📅 系統已自動根據時間戳判斷：將載入 **{sel_year2} 年 ({t_mco2})** 的用電統計進行高頻轉換。")
 
                 target_data2 = None
                 if sel_loc2 == '不分區 (全校總用電)':
@@ -266,9 +262,12 @@ with tab2:
                         intervals = days_in_m * 96
                         day_idx = np.arange(intervals)
                         hour_d = (day_idx % 96) * 0.25
-                        profile = 1.0 + 0.4 * np.sin(2 * np.pi * (hour_d - 6) / 24)
-                        profile = np.clip(profile, 0.3, 1.8)
-                        avg_kw = m_kwh / (intervals * 0.25) if intervals > 0 else 0
+                        
+                        # 💡 修正：確保日負載特徵曲線的基準與數值比例正確（避免數值被灌水放大）
+                        profile = 1.0 + 0.3 * np.sin(2 * np.pi * (hour_d - 6) / 24)
+                        profile = np.clip(profile, 0.4, 1.6)
+                        
+                        avg_kw = m_kwh / (days_in_m * 24) if days_in_m > 0 else 0
                         p_mean = np.mean(profile)
                         if p_mean > 0:
                             profile = profile / p_mean
@@ -276,6 +275,11 @@ with tab2:
                         high_freq_list.extend(kw_series.tolist())
 
                     raw_history = high_freq_list
+                    
+                    # 💡 建立對應該年份的完整時間索引，確保切片能正確抓到該時間點的歷史
+                    full_time_index = pd.date_range(start=f'{sel_year2}-01-01 00:00:00+08:00', periods=len(raw_history), freq='15min')
+                    st.session_state['df_temp_history'] = pd.Series(raw_history, index=full_time_index)
+                    
                     st.success(f"✅ 成功將 {sel_year2} 年【{sel_loc2}】轉換為高頻序列 (共 {len(raw_history)} 筆)")
                 else:
                     st.warning(f"⚠️ 在檔案中找不到 {sel_year2} 年 ({t_mco2}) 對應的【{sel_loc2}】數值。")
@@ -298,18 +302,22 @@ with tab2:
                     if parsed_input_dt.tzinfo is None:
                         parsed_input_dt = parsed_input_dt.tz_localize('Asia/Taipei')
                     
-                    # 建立時間序列並根據時間戳切片
-                    sel_year_for_index = parsed_input_dt.year
-                    full_time_index = pd.date_range(start=f'{sel_year_for_index}-01-01 00:00:00+08:00', periods=len(raw_history), freq='15min')
-                    df_temp_history = pd.Series(raw_history, index=full_time_index)
+                    # 從 session 或現場重建時間序列並進行嚴格的時間切片
+                    if 'df_temp_history' in st.session_state:
+                        df_temp_history = st.session_state['df_temp_history']
+                    else:
+                        sel_year_for_index = parsed_input_dt.year
+                        full_time_index = pd.date_range(start=f'{sel_year_for_index}-01-01 00:00:00+08:00', periods=len(raw_history), freq='15min')
+                        df_temp_history = pd.Series(raw_history, index=full_time_index)
                     
+                    # 嚴格切出該時間戳之前的歷史資料（作為 Lookback 視窗）
                     sliced_history = df_temp_history[df_temp_history.index <= parsed_input_dt]
                     
                     if len(sliced_history) >= predictor.lookback_steps:
                         history_input = sliced_history.tolist()
                     else:
-                        st.warning("⚠️ 指定的時間戳之前資料量不足 192 筆，已自動改用該年度完整歷史資料進行預測。")
-                        history_input = [float(x) for x in raw_history]
+                        st.warning("⚠️ 指定的時間戳之前資料量不足 192 筆，已自動取前 192 筆進行預測。")
+                        history_input = raw_history[:predictor.lookback_steps]
 
                     # 呼叫推論引擎
                     result = predictor.forecast_load_kw(history_input, input_timestamp, forecast_days=forecast_days_choice)
@@ -354,7 +362,7 @@ with tab2:
                         label="📥 下載預測結果 CSV 檔案",
                         data=csv_data,
                         file_name=f"forecast_result_{forecast_days_choice}days.csv",
-                        mime="text/csv",
+                        mime="text/css" if False else "text/csv",
                     )
                 else:
                     st.error("❌ 系統防禦機制已攔截！(ai_valid = 0)")
