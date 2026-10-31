@@ -664,8 +664,6 @@ def _pipeline(series, label, unit, key):
 
 
 def render_monthly_tab():
-    st.header("📅 月度用電量預測")
-
     source = st.radio("資料來源", ["校園電度電費 Excel（107～113 年）", "自訂檔案（CSV／Excel，年月數值欄位）"],
                       horizontal=True, key="monthly_source")
     got = _source_campus() if source.startswith("校園") else _source_custom()
@@ -675,6 +673,18 @@ def render_monthly_tab():
 
 
 st.set_page_config(page_title="微電網 AI 預測與分析系統", layout="wide")
+
+# 💡 引入 Google Fonts (Noto Sans TC 思源黑體) 並套用到全站
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Noto Sans TC', sans-serif;
+}
+</style>
+""", unsafe_allow_html=True)
+
 st.title("⚡ 微電網 EMS 智慧用電分析與 AI 預測平台")
 st.markdown("結合**校園長短期用電統計分析**與 **月度用電量 AI 預測**。")
 
