@@ -663,9 +663,6 @@ def _pipeline(series, label, unit, key):
 
 
 def render_monthly_tab():
-    st.header("📅 月度用電量預測")
-    st.caption("使用真實月度資料，不經過正弦波還原。切分方式為時間順序 5:1:1（訓練／驗證／測試）。")
-
     source = st.radio("資料來源", ["校園電度電費 Excel（107～113 年）", "自訂檔案（CSV／Excel，年月數值欄位）"],
                       horizontal=True, key="monthly_source")
     got = _source_campus() if source.startswith("校園") else _source_custom()
