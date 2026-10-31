@@ -511,6 +511,19 @@ def _plot_predictions(frame, unit):
 def _plot_forecast(series, months, values, label, unit):
     fig, ax = plt.subplots(figsize=(11, 4.5))
     x = pd.to_datetime([m + "-01" for m in months])
+    
+    # 取得前一年同期實際數值作對比
+    prev_x = []
+    prev_vals = []
+    for m in months:
+        dt = pd.to_datetime(m + "-01") - pd.DateOffset(years=1)
+        if dt in series.index:
+            prev_x.append(pd.to_datetime(m + "-01"))
+            prev_vals.append(float(series.loc[dt]))
+
+    if prev_vals:
+        ax.plot(prev_x, prev_vals, color="tab:blue", marker="s", linestyle="-", label="Actual (Last Year)")
+
     ax.plot(x, values, color="tab:red", marker="o", linestyle="--", label=label)
     ax.set_title("Monthly Forecast Result")
     ax.set_xlabel("Month")
@@ -569,7 +582,7 @@ def _source_custom():
     except Exception as e:
         st.error(f"資料整理失敗：{e}")
         return None
-    return series, vcol, unit, ("custom", file.name, ycol, mcol, vcol)
+    return series, vvol, unit, ("custom", file.name, ycol, mcol, vcol)
 
 
 def _pipeline(series, label, unit, key):
@@ -641,6 +654,7 @@ def _pipeline(series, label, unit, key):
 
 def render_monthly_tab():
     st.header("📅 月度用電量預測")
+    
 
     source = st.radio("資料來源", ["校園電度電費 Excel（107～113 年）", "自訂檔案（CSV／Excel，年月數值欄位）"],
                       horizontal=True, key="monthly_source")
