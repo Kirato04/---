@@ -418,9 +418,8 @@ def forecast_monthly(recent_history, latest_month, forecast_months=1):
 
 
 # =========================================================
-# 月度用電量預測：網頁畫面（原 monthly_app.py）
+# 月度用電量預測：網頁畫面
 # =========================================================
-# ---- 校園電度電費 Excel（與版本 A 分頁一相同的檔案與讀取規則）----
 CAMPUS_SHEET = "107-113各月度數費用合併"
 CAMPUS_YEARS = {2018: "107年", 2019: "108年", 2020: "109年", 2021: "110年",
                 2022: "111年", 2023: "112年", 2024: "113年"}
@@ -430,16 +429,11 @@ _UNIT_EN = {"度": "kWh", "度數": "kWh", "元": "NTD"}
 
 
 def _en_unit(u):
-    """圖表只用英文標籤（雲端環境沒有中文字型，中文會變方框）。"""
     u = (u or "").strip()
     return _UNIT_EN.get(u, u if (u and u.isascii()) else "unit")
 
 
-# ---------------------------------------------------------
-# 資料讀取
-# ---------------------------------------------------------
 def _campus_year_row(df_excel, target_mco, location):
-    """與版本 A 分頁一完全相同的規則，取出某年某地點的 12 個月度數。"""
     if location == "不分區 (全校總用電)":
         recs = []
         for idx, row in df_excel.iterrows():
@@ -467,7 +461,6 @@ def _campus_year_row(df_excel, target_mco, location):
 
 
 def load_campus_series(xl, sheet, location):
-    """把 107～113 年各 12 個月的度數接成一條 84 個月的月度序列。"""
     df_excel = xl.parse(sheet, header=None)
     rows, missing = [], []
     for year, mco in CAMPUS_YEARS.items():
@@ -505,16 +498,12 @@ def _guess(cols, keys, default):
 
 
 def _clean_digits(df, cols):
-    """「107年」「1月」這類文字，只保留數字部分。"""
     d = df.copy()
     for c in cols:
         d[c] = d[c].astype(str).str.extract(r"(\d+)")[0]
     return d
 
 
-# ---------------------------------------------------------
-# 圖表與表格
-# ---------------------------------------------------------
 def _metrics_table(metrics):
     rows = []
     for model, by_split in metrics.items():
@@ -558,11 +547,8 @@ def _plot_forecast(series, months, values, label, unit):
     return fig
 
 
-# ---------------------------------------------------------
-# 兩種資料來源：各自回傳 (series, 顯示名稱, 單位, 狀態識別 key)，或 None
-# ---------------------------------------------------------
 def _source_campus():
-    file = st.file_uploader("請上傳校園電度電費 Excel 統計檔案（與版本 A 分頁一相同的檔案）",
+    file = st.file_uploader("請上傳校園電度電費 Excel 統計檔案",
                             type=["xlsx", "xls"], key="monthly_campus_excel")
     if file is None:
         st.info("💡 請先上傳 107～113 年的電度電費 Excel，系統會自動取出各年 12 個月的用電度數，共 84 個月。")
@@ -611,9 +597,6 @@ def _source_custom():
     return series, vcol, unit, ("custom", file.name, ycol, mcol, vcol)
 
 
-# ---------------------------------------------------------
-# 共同流程：切分 -> 訓練評估 -> 預測
-# ---------------------------------------------------------
 def _pipeline(series, label, unit, key):
     try:
         train, val, test = split_5_1_1(series)
@@ -622,10 +605,10 @@ def _pipeline(series, label, unit, key):
         return
 
     st.success(
-        f"共 {len(series)} 個月（{series.index[0]:%Y-%m} ～ {series.index[-1]:%Y-%m}）　"
+        f"共 {len(series)} 個月（{series.index[0]:%Y-%m} ～ {series.index[-1]:%Y-%m}） "
         f"訓練 {len(train)}／驗證 {len(val)}／測試 {len(test)} 個月"
     )
-    st.line_chart(series.rename(label))
+    # st.line_chart(series.rename(label))  # 已依需求移除預測頁面的用電分析圖表
 
     st.subheader("訓練與評估")
     try:
@@ -635,7 +618,7 @@ def _pipeline(series, label, unit, key):
         has_hw = False
     use_hw = st.checkbox("加入 Holt-Winters 比較", value=has_hw, disabled=not has_hw)
     if not has_hw:
-        st.caption("未安裝 statsmodels，已略過 Holt-Winters（requirements.txt 加入 statsmodels 即可啟用）。")
+        st.caption("未安裝 statsmodels，已略過 Holt-Winters。")
     epochs = st.slider("LSTM 最大訓練輪數（會自動提早停止）", 50, 1000, 300, step=50)
 
     if st.button("開始訓練並評估", type="primary"):
@@ -654,8 +637,7 @@ def _pipeline(series, label, unit, key):
     st.write(f"驗證集表現最佳的模型：**{res['best_model']}**")
     st.dataframe(_metrics_table(res["metrics"]), use_container_width=True, hide_index=True)
     st.pyplot(_plot_predictions(res["predictions"], unit))
-    st.caption("LSTM 的驗證集同時用於提早停止，所以驗證集成績略偏樂觀；測試集才是最終成績。"
-               "LSTM 必須勝過「seasonal_naive（去年同月）」才有意義。")
+    st.caption("LSTM 的驗證集同時用於提早停止，所以驗證集成績略偏樂觀；測試集才是最終成績。")
 
     st.subheader("預測未來月份")
     n_ahead = st.number_input("預測幾個月", 1, 12, 3)
@@ -680,9 +662,6 @@ def _pipeline(series, label, unit, key):
             st.json(predictor.get_system_audit_report())
 
 
-# ---------------------------------------------------------
-# 主畫面
-# ---------------------------------------------------------
 def render_monthly_tab():
     st.header("📅 月度用電量預測")
     st.caption("使用真實月度資料，不經過正弦波還原。切分方式為時間順序 5:1:1（訓練／驗證／測試）。")
