@@ -165,7 +165,7 @@ def train_lstm(X_tr, y_tr, X_va, y_va, epochs=500, seed=42):
 # 5. 完整實驗流程
 # ---------------------------------------------------------
 def run_experiment(series, out_dir=".", target_name="度數", unit="kWh",
-                   use_holt_winters=True, use_lstm=True, epochs=500, seed=42,
+                   use_holt_winters=True, use_lstm=True, epochs=300, seed=42,
                    save=True):
     n = len(series)
     train, val, test = split_5_1_1(series)
@@ -509,7 +509,6 @@ def _plot_predictions(frame, unit):
 
 
 def _plot_forecast(series, months, values, label, unit):
-    # 只顯示預測結果圖表，不畫歷史數據
     fig, ax = plt.subplots(figsize=(11, 4.5))
     x = pd.to_datetime([m + "-01" for m in months])
     ax.plot(x, values, color="tab:red", marker="o", linestyle="--", label=label)
@@ -594,7 +593,8 @@ def _pipeline(series, label, unit, key):
     use_hw = st.checkbox("加入 Holt-Winters 比較", value=has_hw, disabled=not has_hw)
     if not has_hw:
         st.caption("未安裝 statsmodels，已略過 Holt-Winters。")
-    epochs = st.slider("LSTM 最大訓練輪數（會自動提早停止）", 50, 1000, 300, step=50)
+    
+    epochs = 300  # 固定最佳預設輪數，無須使用者手動調整
 
     if st.button("開始訓練並評估", type="primary"):
         with st.spinner("訓練中，請稍候…"):
