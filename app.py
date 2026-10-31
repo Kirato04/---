@@ -657,7 +657,6 @@ def _pipeline(series, label, unit, key):
 
 
 def render_monthly_tab():
-    st.header("📅 月度用電量預測")
 
     source = st.radio("資料來源", ["校園電度電費 Excel（107～113 年）", "自訂檔案（CSV／Excel，年月數值欄位）"],
                       horizontal=True, key="monthly_source")
