@@ -12,10 +12,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-try:
-    import monthly_forecast as mf      # 檔名為 monthly_forecast.py 時
-except ModuleNotFoundError:
-    import month_infer as mf           # 檔名為 month_infer.py 時
+import monthly_forecast as mf
 
 ASSET_DIR = Path(mf.__file__).resolve().parent  # 模型與設定檔存放位置
 
@@ -189,9 +186,3 @@ def render_monthly_tab():
                                    "monthly_forecast.csv", "text/csv")
             with st.expander("系統稽核報表"):
                 st.json(predictor.get_system_audit_report())
-
-
-# 若這個檔案被當成主程式執行（例如暫時命名為 app.py），就直接顯示月度頁面；
-# 被 app.py 以 import 方式引用時，不會自動執行。
-if __name__ == "__main__":
-    render_monthly_tab()
