@@ -67,21 +67,22 @@ def split_5_1_1(series):
 
 
 # ---------------------------------------------------------
-# 2. 縮放與特徵
+# 2. 標準化縮放與特徵（改用 Z-score 標準化：mean=0, std=1）
 # ---------------------------------------------------------
 def _fit_scaler(train_values):
-    lo, hi = float(np.min(train_values)), float(np.max(train_values))
-    if hi - lo < 1e-9:
-        hi = lo + 1.0
-    return {"lo": lo, "hi": hi}
+    mean = float(np.mean(train_values))
+    std = float(np.std(train_values))
+    if std < 1e-9:
+        std = 1.0
+    return {"mean": mean, "std": std}
 
 
 def _scale(x, sc):
-    return (np.asarray(x, dtype=float) - sc["lo"]) / (sc["hi"] - sc["lo"])
+    return (np.asarray(x, dtype=float) - sc["mean"]) / sc["std"]
 
 
 def _unscale(x, sc):
-    return np.asarray(x, dtype=float) * (sc["hi"] - sc["lo"]) + sc["lo"]
+    return np.asarray(x, dtype=float) * sc["std"] + sc["mean"]
 
 
 def _month_feats(index):
@@ -215,7 +216,7 @@ def run_experiment(series, out_dir=".", target_name="度數", unit="kWh",
         frame[m] = np.concatenate([p["val"], p["test"]])
 
     config = {
-        "model_version": "monthly_v1",
+        "model_version": "monthly_v1_zscore",
         "lookback_months": LOOKBACK_MONTHS,
         "target_name": target_name,
         "unit": unit,
@@ -237,7 +238,7 @@ def run_experiment(series, out_dir=".", target_name="度數", unit="kWh",
 
 
 # ---------------------------------------------------------
-# 6. 推論與防禦（月版 - 使用 LSTM）
+# 6. 推論與防禦（月版）
 # ---------------------------------------------------------
 class MonthlyEMSPredictor:
     def __init__(self, model_path="monthly_model.keras", config_path="monthly_config.json"):
@@ -273,12 +274,10 @@ class MonthlyEMSPredictor:
             self.scaler = self.config["scaler"]
             self.unit = self.config.get("unit", "kWh")
             self.model_version = self.config.get("model_version", "monthly_v1")
-            
             if not self.model_path.exists():
                 raise FileNotFoundError(f"找不到模型檔: {self.model_path}")
             import tensorflow as tf
             self.model = tf.keras.models.load_model(str(self.model_path), compile=False)
-            
             self.is_ready = True
         except Exception as e:
             self.is_ready = False
@@ -334,10 +333,10 @@ class MonthlyEMSPredictor:
             return self._fail("model_not_ready", self.init_error or "模型未就緒", months, window)
 
         try:
-            upper = self.scaler["hi"] * 3
+            # 標準化下的合理邊界判定（避免超出訓練平均值的 ± 5個標準差範圍）
+            upper = self.scaler["mean"] + self.scaler["std"] * 6
             win = list(window)
             preds = []
-
             for i in range(len(months)):
                 end = latest + pd.DateOffset(months=i)
                 w_idx = pd.date_range(end=end, periods=self.lookback, freq="MS")
@@ -350,7 +349,6 @@ class MonthlyEMSPredictor:
                                       f"第 {i + 1} 個月預測值異常：{p}", months, window)
                 preds.append(p)
                 win = win[1:] + [p]
-
         except Exception as e:
             return self._fail("unexpected_exception", f"推論例外：{e}", months, window)
 
@@ -613,12 +611,12 @@ def _pipeline(series, label, unit, key):
     epochs = 300  # 固定最佳預設輪數，無須使用者手動調整
 
     if st.button("開始訓練並評估", type="primary"):
-        with st.spinner("訓練與預測中，請稍候…"):
+        with st.spinner("訓練與預測中（Z-score 標準化），請稍候…"):
             try:
                 res = run_experiment(series, out_dir=str(ASSET_DIR), target_name=label,
                                         unit=unit, use_holt_winters=use_hw, epochs=epochs)
                 
-                # 自動執行未來 12 個月 LSTM 預測
+                # 同時自動執行未來 12 個月預測
                 predictor = MonthlyEMSPredictor()
                 out = predictor.forecast_monthly(series.to_numpy(), series.index[-1], 12)
                 
