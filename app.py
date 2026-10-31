@@ -250,7 +250,7 @@ class MonthlyEMSPredictor:
         self.lookback = LOOKBACK_MONTHS
         self.unit = "kWh"
         self.model_version = "unknown"
-        self.best_model_name = "lstm"  # 預設
+        self.best_model_name = "lstm"
         self.is_ready = False
         self.init_error = None
         self.stats = {
@@ -275,7 +275,6 @@ class MonthlyEMSPredictor:
             self.unit = self.config.get("unit", "kWh")
             self.model_version = self.config.get("model_version", "monthly_v1")
             
-            # 💡 讀取訓練時表現最佳的模型名稱 (如 holt_winters 或 lstm)
             self.best_model_name = self.config.get("best_model_on_val", "lstm")
 
             if self.best_model_name == "lstm":
@@ -343,9 +342,7 @@ class MonthlyEMSPredictor:
             win = list(window)
             preds = []
 
-            # 💡 根據最佳模型名稱動態選擇預測方式！
-           if self.best_model_name == "holt_winters":
-                # 使用 Holt-Winters 進行多步滾動預測
+            if self.best_model_name == "holt_winters":
                 from statsmodels.tsa.holtwinters import ExponentialSmoothing
                 full_history = np.array(recent_history, dtype=float)
                 for i in range(len(months)):
@@ -355,25 +352,22 @@ class MonthlyEMSPredictor:
                     ).fit()
                     p = float(fit.forecast(1)[0])
                     
-                    # 💡 加上防禦性限制：用電量不可能小於 0，若出現負數或異常則夾緊在 0 或使用下限
                     if not np.isfinite(p):
                         return self._fail("model_output_invalid", f"第 {i + 1} 個月預測值異常：{p}", months, window)
                     if p < 0:
-                        p = 0.0  # 強制夾緊為 0，避免負數崩潰
+                        p = 0.0  # 防止負數崩潰
                         
                     preds.append(p)
                     full_history = np.append(full_history, p)
 
             elif self.best_model_name == "seasonal_naive":
-                # 使用季節性基準（去年同月）預測
                 full_history = np.array(recent_history, dtype=float)
                 for i in range(len(months)):
-                    p = float(full_history[-12]) # 去年同月值
+                    p = float(full_history[-12])
                     preds.append(p)
                     full_history = np.append(full_history, p)
 
             else:
-                # 預設使用 LSTM 進行預測
                 for i in range(len(months)):
                     end = latest + pd.DateOffset(months=i)
                     w_idx = pd.date_range(end=end, periods=self.lookback, freq="MS")
