@@ -660,7 +660,7 @@ tab1, tab2 = st.tabs([
 ])
 
 with tab1:
-    st.header("📈 歷史用電統計與動態趨勢分析")
+    st.header("📈 1. 歷史用電統計與動態趨勢分析")
     
     with st.expander("📌 點此查看【歷史統計檔案】的規格與欄位說明", expanded=False):
         st.markdown("""
@@ -778,5 +778,5 @@ with tab1:
         st.info("💡 請先上傳您的電度電費 Excel 統計檔案，即可檢視月統計與趨勢圖。")
 
 with tab2:
-    st.header("🚀 月度用電量 AI 預測系統")
+    st.header("🚀 2. 月度用電量 AI 預測系統")
     render_monthly_tab()
