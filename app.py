@@ -237,7 +237,7 @@ def run_experiment(series, out_dir=".", target_name="度數", unit="kWh",
 
 
 # ---------------------------------------------------------
-# 6. 推論與防禦（月版）
+# 6. 推論與防禦（動態選擇最佳模型）
 # ---------------------------------------------------------
 class MonthlyEMSPredictor:
     def __init__(self, model_path="monthly_model.keras", config_path="monthly_config.json"):
@@ -250,6 +250,7 @@ class MonthlyEMSPredictor:
         self.lookback = LOOKBACK_MONTHS
         self.unit = "kWh"
         self.model_version = "unknown"
+        self.best_model_name = "lstm"  # 預設
         self.is_ready = False
         self.init_error = None
         self.stats = {
@@ -273,10 +274,16 @@ class MonthlyEMSPredictor:
             self.scaler = self.config["scaler"]
             self.unit = self.config.get("unit", "kWh")
             self.model_version = self.config.get("model_version", "monthly_v1")
-            if not self.model_path.exists():
-                raise FileNotFoundError(f"找不到模型檔: {self.model_path}")
-            import tensorflow as tf
-            self.model = tf.keras.models.load_model(str(self.model_path), compile=False)
+            
+            # 💡 讀取訓練時表現最佳的模型名稱 (如 holt_winters 或 lstm)
+            self.best_model_name = self.config.get("best_model_on_val", "lstm")
+
+            if self.best_model_name == "lstm":
+                if not self.model_path.exists():
+                    raise FileNotFoundError(f"找不到模型檔: {self.model_path}")
+                import tensorflow as tf
+                self.model = tf.keras.models.load_model(str(self.model_path), compile=False)
+            
             self.is_ready = True
         except Exception as e:
             self.is_ready = False
@@ -335,18 +342,48 @@ class MonthlyEMSPredictor:
             upper = self.scaler["hi"] * 3
             win = list(window)
             preds = []
-            for i in range(len(months)):
-                end = latest + pd.DateOffset(months=i)
-                w_idx = pd.date_range(end=end, periods=self.lookback, freq="MS")
-                x = _window_features(_scale(win, self.scaler), w_idx)[None, ...]
-                p_scaled = float(np.asarray(
-                    self.model.predict(x.astype(np.float32), verbose=0)).reshape(-1)[0])
-                p = float(_unscale(p_scaled, self.scaler))
-                if not np.isfinite(p) or p < 0 or p > upper:
-                    return self._fail("model_output_invalid",
-                                      f"第 {i + 1} 個月預測值異常：{p}", months, window)
-                preds.append(p)
-                win = win[1:] + [p]
+
+            # 💡 根據最佳模型名稱動態選擇預測方式！
+            if self.best_model_name == "holt_winters":
+                # 使用 Holt-Winters 進行多步滾動預測
+                from statsmodels.tsa.holtwinters import ExponentialSmoothing
+                full_history = np.array(recent_history, dtype=float)
+                for i in range(len(months)):
+                    # 動態擬合並預測下一期
+                    fit = ExponentialSmoothing(
+                        full_history, trend="add", seasonal="add",
+                        seasonal_periods=12, initialization_method="estimated",
+                    ).fit()
+                    p = float(fit.forecast(1)[0])
+                    if not np.isfinite(p) or p < 0 or p > upper:
+                        return self._fail("model_output_invalid", f"第 {i + 1} 個月預測值異常：{p}", months, window)
+                    preds.append(p)
+                    # 將預測值加入歷史中繼續滾動下一期
+                    full_history = np.append(full_history, p)
+
+            elif self.best_model_name == "seasonal_naive":
+                # 使用季節性基準（去年同月）預測
+                full_history = np.array(recent_history, dtype=float)
+                for i in range(len(months)):
+                    p = float(full_history[-12]) # 去年同月值
+                    preds.append(p)
+                    full_history = np.append(full_history, p)
+
+            else:
+                # 預設使用 LSTM 進行預測
+                for i in range(len(months)):
+                    end = latest + pd.DateOffset(months=i)
+                    w_idx = pd.date_range(end=end, periods=self.lookback, freq="MS")
+                    x = _window_features(_scale(win, self.scaler), w_idx)[None, ...]
+                    p_scaled = float(np.asarray(
+                        self.model.predict(x.astype(np.float32), verbose=0)).reshape(-1)[0])
+                    p = float(_unscale(p_scaled, self.scaler))
+                    if not np.isfinite(p) or p < 0 or p > upper:
+                        return self._fail("model_output_invalid",
+                                          f"第 {i + 1} 個月預測值異常：{p}", months, window)
+                    preds.append(p)
+                    win = win[1:] + [p]
+
         except Exception as e:
             return self._fail("unexpected_exception", f"推論例外：{e}", months, window)
 
@@ -356,7 +393,7 @@ class MonthlyEMSPredictor:
             "fallback_values": None,
             "prediction_months": [m.strftime("%Y-%m") for m in months],
             "unit": self.unit,
-            "model_version": self.model_version,
+            "model_version": f"{self.model_version} (Best: {self.best_model_name})",
             "error_reason": None,
             "fallback_strategy": None,
         }
@@ -512,7 +549,6 @@ def _plot_forecast(series, months, values, label, unit):
     fig, ax = plt.subplots(figsize=(11, 4.5))
     x = pd.to_datetime([m + "-01" for m in months])
     
-    # 取得前一年同期實際數值作對比
     prev_x = []
     prev_vals = []
     for m in months:
@@ -582,7 +618,7 @@ def _source_custom():
     except Exception as e:
         st.error(f"資料整理失敗：{e}")
         return None
-    return series, vvol, unit, ("custom", file.name, ycol, mcol, vcol)
+    return series, vcol, unit, ("custom", file.name, ycol, mcol, vcol)
 
 
 def _pipeline(series, label, unit, key):
@@ -634,11 +670,11 @@ def _pipeline(series, label, unit, key):
         predictor = MonthlyEMSPredictor()
         out = predictor.forecast_monthly(series.to_numpy(), series.index[-1], int(n_ahead))
         if out["ai_valid"] == 1:
-            vals, line_label = out["forecast_values"], "LSTM forecast"
-            st.success("LSTM 預測成功")
+            vals, line_label = out["forecast_values"], f"{predictor.best_model_name} forecast"
+            st.success(f"{predictor.best_model_name.upper()} 預測成功")
         else:
             vals, line_label = out["fallback_values"], "Fallback (same month last year)"
-            st.warning(f"LSTM 無法使用：{out['error_reason']}")
+            st.warning(f"預測無法使用：{out['error_reason']}")
         if vals is None:
             st.error("也無法產生備援值。")
         else:
@@ -654,7 +690,6 @@ def _pipeline(series, label, unit, key):
 
 def render_monthly_tab():
     st.header("📅 月度用電量預測")
-    
 
     source = st.radio("資料來源", ["校園電度電費 Excel（107～113 年）", "自訂檔案（CSV／Excel，年月數值欄位）"],
                       horizontal=True, key="monthly_source")
@@ -666,11 +701,11 @@ def render_monthly_tab():
 
 st.set_page_config(page_title="微電網 AI 預測與分析系統", layout="wide")
 st.title("⚡ 微電網 EMS 智慧用電分析與 AI 預測平台")
-st.markdown("結合**校園長短期用電統計分析**與 **月度用電量 AI 預測**。")
+st.markdown("結合**校園長短期用電統計分析**與 **月度用電量預測系統**。")
 
 tab1, tab2 = st.tabs([
     "📈 1. 歷史用電統計與動態趨勢分析", 
-    "🚀 2. 月度用電量 AI 預測系統"
+    "🚀 2. 月度用電量預測系統"
 ])
 
 with tab1:
@@ -792,5 +827,5 @@ with tab1:
         st.info("💡 請先上傳您的電度電費 Excel 統計檔案，即可檢視月統計與趨勢圖。")
 
 with tab2:
-    st.header("🚀 月度用電量 AI 預測系統")
+    st.header("🚀 月度用電量預測系統")
     render_monthly_tab()
