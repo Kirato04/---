@@ -338,7 +338,6 @@ class MonthlyEMSPredictor:
             win = list(window)
             preds = []
 
-            # 💡 固定使用 LSTM 模型進行多步預測
             for i in range(len(months)):
                 end = latest + pd.DateOffset(months=i)
                 w_idx = pd.date_range(end=end, periods=self.lookback, freq="MS")
@@ -614,13 +613,23 @@ def _pipeline(series, label, unit, key):
     epochs = 300  # 固定最佳預設輪數，無須使用者手動調整
 
     if st.button("開始訓練並評估", type="primary"):
-        with st.spinner("訓練中，請稍候…"):
+        with st.spinner("訓練與預測中，請稍候…"):
             try:
                 res = run_experiment(series, out_dir=str(ASSET_DIR), target_name=label,
                                         unit=unit, use_holt_winters=use_hw, epochs=epochs)
-                st.session_state["monthly_result"] = {"res": res, "key": key}
+                
+                # 自動執行未來 12 個月 LSTM 預測
+                predictor = MonthlyEMSPredictor()
+                out = predictor.forecast_monthly(series.to_numpy(), series.index[-1], 12)
+                
+                st.session_state["monthly_result"] = {
+                    "res": res, 
+                    "forecast_out": out, 
+                    "audit_report": predictor.get_system_audit_report(),
+                    "key": key
+                }
             except Exception as e:
-                st.error(f"訓練失敗：{e}")
+                st.error(f"訓練或預測失敗：{e}")
 
     saved = st.session_state.get("monthly_result")
     if not (saved and saved["key"] == key):
@@ -632,17 +641,16 @@ def _pipeline(series, label, unit, key):
     st.pyplot(_plot_predictions(res["predictions"], unit))
     st.caption("LSTM 的驗證集同時用於提早停止，所以驗證集成績略偏樂觀；測試集才是最終成績。")
 
-    st.subheader("預測未來月份")
-    n_ahead = 12  # 直接固定預測 12 個月（未來一年）
-    if st.button("執行預測"):
-        predictor = MonthlyEMSPredictor()
-        out = predictor.forecast_monthly(series.to_numpy(), series.index[-1], int(n_ahead))
+    st.subheader("預測未來月份（未來 12 個月）")
+    out = saved.get("forecast_out")
+    if out is not None:
         if out["ai_valid"] == 1:
             vals, line_label = out["forecast_values"], "LSTM forecast"
             st.success("LSTM 預測成功")
         else:
             vals, line_label = out["fallback_values"], "Fallback (same month last year)"
-            st.warning(f"LSTM 無法使用：{out['error_reason']}")
+            st.warning(f"預測無法使用：{out['error_reason']}")
+        
         if vals is None:
             st.error("也無法產生備援值。")
         else:
@@ -652,11 +660,13 @@ def _pipeline(series, label, unit, key):
             st.pyplot(_plot_forecast(series, out["prediction_months"], vals, line_label, unit))
             st.download_button("下載預測結果 CSV", tbl.to_csv(index=False).encode("utf-8-sig"),
                                "monthly_forecast.csv", "text/csv")
+        
         with st.expander("系統稽核報表"):
-            st.json(predictor.get_system_audit_report())
+            st.json(saved.get("audit_report", {}))
 
 
 def render_monthly_tab():
+    st.header("📅 月度用電量預測")
 
     source = st.radio("資料來源", ["校園電度電費 Excel（107～113 年）", "自訂檔案（CSV／Excel，年月數值欄位）"],
                       horizontal=True, key="monthly_source")
