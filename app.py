@@ -610,7 +610,11 @@ def _pipeline(series, label, unit, key):
         return
     res = saved["res"]
     st.write(f"驗證集表現最佳的模型：**{res['best_model']}**")
-    st.dataframe(_metrics_table(res["metrics"]), use_container_width=True, hide_index=True)
+    
+    # 🔽 使用 st.expander 將評估指標表格收納起來
+    with st.expander("📋 點此展開／收合模型評估指標表 (Metrics)", expanded=False):
+        st.dataframe(_metrics_table(res["metrics"]), use_container_width=True, hide_index=True)
+        
     st.pyplot(_plot_predictions(res["predictions"], unit))
     st.caption("LSTM 的驗證集同時用於提早停止，所以驗證集成績略偏樂觀；測試集才是最終成績。")
 
