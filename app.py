@@ -7,38 +7,701 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import calendar
-from infer import EMSLoadPredictor
 
-try:
-    from monthly_app import render_monthly_tab
-    _monthly_import_error = None
-except Exception as _e:  # 缺檔或套件問題時，只在選版本 B 時顯示錯誤
-    render_monthly_tab = None
-    _monthly_import_error = _e
+import json
+from datetime import datetime
+from pathlib import Path
+
+# =========================================================
+# 月度用電量預測：計算引擎（原 month_infer.py / monthly_forecast.py）
+# =========================================================
+ASSET_DIR = Path(__file__).resolve().parent  # 模型與設定檔存放位置
+
+LOOKBACK_MONTHS = 12
+
+
+# ---------------------------------------------------------
+# 1. 資料整理與 5:1:1 切分
+# ---------------------------------------------------------
+def build_monthly_series(df, year_col, month_col, value_col, roc_year=True):
+    """
+    把「年、月、數值」三欄整理成以月初為索引的 pd.Series。
+    roc_year=True 代表年份是民國年（107 -> 2018）。
+    缺月、重複月份、負值都會直接報錯，避免悄悄產生錯誤資料。
+    """
+    d = df[[year_col, month_col, value_col]].copy()
+    d[value_col] = pd.to_numeric(d[value_col], errors="coerce")
+    year = pd.to_numeric(d[year_col], errors="coerce")
+    month = pd.to_numeric(d[month_col], errors="coerce")
+    if roc_year:
+        year = year + 1911
+    d["_y"], d["_m"] = year, month
+    d = d.dropna(subset=["_y", "_m", value_col])
+    if d.empty:
+        raise ValueError("沒有可用的「年／月／數值」資料，請確認欄位選擇是否正確")
+
+    idx = pd.to_datetime(
+        {"year": d["_y"].astype(int), "month": d["_m"].astype(int), "day": 1}
+    )
+    s = pd.Series(d[value_col].to_numpy(dtype=float), index=idx).sort_index()
+
+    if s.index.duplicated().any():
+        raise ValueError(f"有重複的月份：{list(s.index[s.index.duplicated()].strftime('%Y-%m'))}")
+    full = pd.date_range(s.index.min(), s.index.max(), freq="MS")
+    missing = full.difference(s.index)
+    if len(missing) > 0:
+        raise ValueError(f"缺少月份：{list(missing.strftime('%Y-%m'))}")
+    if (s < 0).any():
+        raise ValueError("資料中含有負值")
+    s.index.freq = "MS"
+    return s
+
+
+def split_5_1_1(series):
+    """依時間順序切成 訓練:驗證:測試 = 5:1:1（84 個月 -> 60 / 12 / 12）。"""
+    n = len(series)
+    n_val = n // 7
+    n_test = n // 7
+    n_train = n - n_val - n_test
+    if n_val < 1 or n_train <= LOOKBACK_MONTHS + 1:
+        raise ValueError(f"資料只有 {n} 個月，不足以做 5:1:1 切分與 12 個月回看")
+    return (
+        series.iloc[:n_train],
+        series.iloc[n_train:n_train + n_val],
+        series.iloc[n_train + n_val:],
+    )
+
+
+# ---------------------------------------------------------
+# 2. 縮放與特徵（縮放只用訓練集，避免資料洩漏）
+# ---------------------------------------------------------
+def _fit_scaler(train_values):
+    lo, hi = float(np.min(train_values)), float(np.max(train_values))
+    if hi - lo < 1e-9:
+        hi = lo + 1.0
+    return {"lo": lo, "hi": hi}
+
+
+def _scale(x, sc):
+    return (np.asarray(x, dtype=float) - sc["lo"]) / (sc["hi"] - sc["lo"])
+
+
+def _unscale(x, sc):
+    return np.asarray(x, dtype=float) * (sc["hi"] - sc["lo"]) + sc["lo"]
+
+
+def _month_feats(index):
+    """月份的 sin/cos 編碼：這是日曆特徵，不是造假資料。"""
+    ang = 2 * np.pi * np.asarray(index.month) / 12.0
+    return np.column_stack([np.sin(ang), np.cos(ang)])
+
+
+def _window_features(scaled_window, window_index):
+    return np.column_stack([scaled_window, _month_feats(window_index)])
+
+
+def make_samples(scaled, index, start, end, lookback=LOOKBACK_MONTHS):
+    """目標位置 t 屬於 [start, end)，輸入是 t 之前真實的 12 個月。"""
+    X, y = [], []
+    for t in range(max(start, lookback), end):
+        X.append(_window_features(scaled[t - lookback:t], index[t - lookback:t]))
+        y.append(scaled[t])
+    return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
+
+
+# ---------------------------------------------------------
+# 3. 評估指標
+# ---------------------------------------------------------
+def evaluate(y_true, y_pred):
+    y_true, y_pred = np.asarray(y_true, float), np.asarray(y_pred, float)
+    nz = y_true != 0
+    return {
+        "MAPE_%": float(np.mean(np.abs((y_true[nz] - y_pred[nz]) / y_true[nz])) * 100),
+        "RMSE": float(np.sqrt(np.mean((y_true - y_pred) ** 2))),
+        "MAE": float(np.mean(np.abs(y_true - y_pred))),
+    }
+
+
+# ---------------------------------------------------------
+# 4. 三種模型：季節性基準、Holt-Winters、小型 LSTM
+# ---------------------------------------------------------
+def seasonal_naive_predict(values, positions):
+    """預測值 = 去年同月。這是 LSTM 至少要贏過的最低標準。"""
+    return np.array([values[t - 12] for t in positions])
+
+
+def holt_winters_predict(values, positions):
+    """逐月滾動：每個目標月只用它之前的真實資料重新擬合。"""
+    from statsmodels.tsa.holtwinters import ExponentialSmoothing
+
+    out = []
+    for t in positions:
+        fit = ExponentialSmoothing(
+            values[:t], trend="add", seasonal="add",
+            seasonal_periods=12, initialization_method="estimated",
+        ).fit()
+        out.append(float(fit.forecast(1)[0]))
+    return np.array(out)
+
+
+def build_lstm(lookback=LOOKBACK_MONTHS, n_features=3, units=16, dropout=0.2):
+    import tensorflow as tf
+
+    model = tf.keras.Sequential([
+        tf.keras.layers.Input(shape=(lookback, n_features)),
+        tf.keras.layers.LSTM(units),
+        tf.keras.layers.Dropout(dropout),
+        tf.keras.layers.Dense(1),
+    ])
+    model.compile(optimizer=tf.keras.optimizers.Adam(1e-3), loss="mse")
+    return model
+
+
+def train_lstm(X_tr, y_tr, X_va, y_va, epochs=500, seed=42):
+    import tensorflow as tf
+
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+    model = build_lstm(lookback=X_tr.shape[1], n_features=X_tr.shape[2])
+    stop = tf.keras.callbacks.EarlyStopping(
+        monitor="val_loss", patience=30, restore_best_weights=True
+    )
+    model.fit(X_tr, y_tr, validation_data=(X_va, y_va), epochs=epochs,
+              batch_size=8, shuffle=True, callbacks=[stop], verbose=0)
+    return model
+
+
+# ---------------------------------------------------------
+# 5. 完整實驗流程：切分 -> 訓練 -> 驗證/測試 -> 存檔
+# ---------------------------------------------------------
+def run_experiment(series, out_dir=".", target_name="度數", unit="kWh",
+                   use_holt_winters=True, use_lstm=True, epochs=500, seed=42,
+                   save=True):
+    n = len(series)
+    train, val, test = split_5_1_1(series)
+    n_train, n_val = len(train), len(val)
+    values, index = series.to_numpy(dtype=float), series.index
+
+    sc = _fit_scaler(train.to_numpy())
+    scaled = _scale(values, sc)
+    ranges = {"val": (n_train, n_train + n_val), "test": (n_train + n_val, n)}
+
+    preds = {"seasonal_naive": {}}
+    for name, (a, b) in ranges.items():
+        preds["seasonal_naive"][name] = seasonal_naive_predict(values, range(a, b))
+
+    if use_holt_winters:
+        try:
+            preds["holt_winters"] = {
+                name: holt_winters_predict(values, range(a, b))
+                for name, (a, b) in ranges.items()
+            }
+        except Exception as e:
+            print(f"[略過 Holt-Winters] {e}")
+
+    model = None
+    if use_lstm:
+        try:
+            X_tr, y_tr = make_samples(scaled, index, 0, n_train)
+            X_va, y_va = make_samples(scaled, index, *ranges["val"])
+            model = train_lstm(X_tr, y_tr, X_va, y_va, epochs=epochs, seed=seed)
+            preds["lstm"] = {}
+            for name, (a, b) in ranges.items():
+                X, _ = make_samples(scaled, index, a, b)
+                p = model.predict(X, verbose=0).reshape(-1)
+                preds["lstm"][name] = _unscale(p, sc)
+        except ImportError as e:
+            print(f"[略過 LSTM] 沒有安裝 tensorflow：{e}")
+
+    metrics = {
+        m: {name: evaluate(values[slice(*ranges[name])], p[name]) for name in ranges}
+        for m, p in preds.items()
+    }
+    best = min(metrics, key=lambda m: metrics[m]["val"]["MAPE_%"])
+
+    frame = pd.DataFrame({"actual": values[n_train:]}, index=index[n_train:])
+    frame["split"] = ["val"] * n_val + ["test"] * (n - n_train - n_val)
+    for m, p in preds.items():
+        frame[m] = np.concatenate([p["val"], p["test"]])
+
+    config = {
+        "model_version": "monthly_v1",
+        "lookback_months": LOOKBACK_MONTHS,
+        "target_name": target_name,
+        "unit": unit,
+        "scaler": sc,
+        "split_months": {"train": n_train, "val": n_val, "test": n - n_train - n_val},
+        "best_model_on_val": best,
+        "metrics": metrics,
+    }
+    if save:
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "monthly_config.json").write_text(
+            json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        if model is not None:
+            model.save(str(out / "monthly_model.keras"))
+
+    return {"metrics": metrics, "best_model": best, "predictions": frame, "config": config}
+
+
+# ---------------------------------------------------------
+# 6. 推論與防禦（月版）
+# ---------------------------------------------------------
+class MonthlyEMSPredictor:
+    def __init__(self, model_path="monthly_model.keras", config_path="monthly_config.json"):
+        base = Path(__file__).resolve().parent
+        self.model_path = base / model_path
+        self.config_path = base / config_path
+        self.model = None
+        self.scaler = None
+        self.config = {}
+        self.lookback = LOOKBACK_MONTHS
+        self.unit = "kWh"
+        self.model_version = "unknown"
+        self.is_ready = False
+        self.init_error = None
+        self.stats = {
+            "total_requests": 0,
+            "errors": {
+                "timestamp_error": 0, "horizon_error": 0, "dimension_error": 0,
+                "length_insufficient": 0, "invalid_input": 0,
+                "negative_value_blocked": 0, "model_not_ready": 0,
+                "model_output_invalid": 0, "unexpected_exception": 0,
+            },
+            "fallback_used": {"seasonal_naive": 0, "none": 0},
+        }
+        self._load()
+
+    def _load(self):
+        try:
+            if not self.config_path.exists():
+                raise FileNotFoundError(f"找不到設定檔: {self.config_path}")
+            self.config = json.loads(self.config_path.read_text(encoding="utf-8"))
+            self.lookback = int(self.config.get("lookback_months", LOOKBACK_MONTHS))
+            self.scaler = self.config["scaler"]
+            self.unit = self.config.get("unit", "kWh")
+            self.model_version = self.config.get("model_version", "monthly_v1")
+            if not self.model_path.exists():
+                raise FileNotFoundError(f"找不到模型檔: {self.model_path}")
+            import tensorflow as tf
+            self.model = tf.keras.models.load_model(str(self.model_path), compile=False)
+            self.is_ready = True
+        except Exception as e:
+            self.is_ready = False
+            self.init_error = f"元件載入失敗: {e}"
+
+    @staticmethod
+    def _parse_month(x):
+        if x is None:
+            raise ValueError("latest_month 不得為 None")
+        if not isinstance(x, (str, datetime, pd.Timestamp, pd.Period)):
+            raise ValueError(f"不支援的型別 {type(x)}")
+        ts = x.to_timestamp() if isinstance(x, pd.Period) else pd.Timestamp(x)
+        if pd.isna(ts):
+            raise ValueError("無效的月份 (NaT)")
+        if ts.tzinfo is not None:
+            ts = ts.tz_localize(None)
+        return ts.to_period("M").to_timestamp()  # 一律對齊月初
+
+    def forecast_monthly(self, recent_history, latest_month, forecast_months=1):
+        """
+        recent_history：依時間排序的月度數值，最後一筆必須是 latest_month 當月。
+        latest_month：最後一筆資料的月份，例如 "2024-12"。
+        forecast_months：往後預測幾個月（1~12）。
+        """
+        self.stats["total_requests"] += 1
+
+        # 防線 1：月份解析
+        try:
+            latest = self._parse_month(latest_month)
+        except Exception as e:
+            return self._fail("timestamp_error", f"latest_month 無效：{e}", None, None)
+
+        # 防線 2：預測月數
+        if (isinstance(forecast_months, bool)
+                or not isinstance(forecast_months, (int, np.integer))
+                or not 1 <= forecast_months <= 12):
+            return self._fail("horizon_error", "forecast_months 必須是 1~12 的整數", None, None)
+        months = [latest + pd.DateOffset(months=i) for i in range(1, int(forecast_months) + 1)]
+
+        # 防線 3：型別與維度
+        if not isinstance(recent_history, (list, tuple, np.ndarray, pd.Series)):
+            return self._fail("dimension_error", "recent_history 必須為 list 或 array", months, None)
+        try:
+            arr = np.array(recent_history, dtype=np.float64)
+        except (ValueError, TypeError):
+            return self._fail("dimension_error", "輸入含非數值內容", months, None)
+        if arr.ndim != 1:
+            return self._fail("dimension_error", f"必須為 1D，目前為 {arr.ndim}D", months, None)
+
+        # 防線 4：長度
+        if len(arr) < self.lookback:
+            return self._fail("length_insufficient",
+                              f"至少需要 {self.lookback} 個月，目前 {len(arr)} 個月", months, None)
+
+        # 防線 5：物理邊界（NaN/Inf、負值）
+        window = arr[-self.lookback:]
+        if not np.isfinite(window).all():
+            return self._fail("invalid_input", "輸入含 NaN 或 Inf", months, None)
+        if (window < 0).any():
+            return self._fail("negative_value_blocked", "輸入含負值", months, None)
+
+        # 輸入合格：此後若失敗，可用「去年同月」當備援
+        if not self.is_ready:
+            return self._fail("model_not_ready", self.init_error or "模型未就緒", months, window)
+
+        # 防線 6：推論與輸出檢核（有限、非負、不超過訓練最大值的 3 倍）
+        try:
+            upper = self.scaler["hi"] * 3
+            win = list(window)
+            preds = []
+            for i in range(len(months)):
+                end = latest + pd.DateOffset(months=i)
+                w_idx = pd.date_range(end=end, periods=self.lookback, freq="MS")
+                x = _window_features(_scale(win, self.scaler), w_idx)[None, ...]
+                p_scaled = float(np.asarray(
+                    self.model.predict(x.astype(np.float32), verbose=0)).reshape(-1)[0])
+                p = float(_unscale(p_scaled, self.scaler))
+                if not np.isfinite(p) or p < 0 or p > upper:
+                    return self._fail("model_output_invalid",
+                                      f"第 {i + 1} 個月預測值異常：{p}", months, window)
+                preds.append(p)
+                win = win[1:] + [p]
+        except Exception as e:
+            return self._fail("unexpected_exception", f"推論例外：{e}", months, window)
+
+        return {
+            "ai_valid": 1,
+            "forecast_values": [round(v, 2) for v in preds],
+            "fallback_values": None,
+            "prediction_months": [m.strftime("%Y-%m") for m in months],
+            "unit": self.unit,
+            "model_version": self.model_version,
+            "error_reason": None,
+            "fallback_strategy": None,
+        }
+
+    def _fail(self, error_type, msg, months, history):
+        """記錄錯誤；若輸入合格，直接算出『去年同月』備援值。"""
+        self.stats["errors"][error_type] += 1
+        fallback, strategy = None, "none"
+        if history is not None and months:
+            last12 = np.asarray(history)[-12:]
+            fallback = [round(float(last12[i % 12]), 2) for i in range(len(months))]
+            strategy = "seasonal_naive"
+        self.stats["fallback_used"][strategy] += 1
+        return {
+            "ai_valid": 0,
+            "forecast_values": None,
+            "fallback_values": fallback,
+            "prediction_months": [m.strftime("%Y-%m") for m in months] if months else None,
+            "unit": self.unit,
+            "model_version": self.model_version,
+            "error_reason": msg,
+            "fallback_strategy": strategy,
+        }
+
+    def get_system_audit_report(self):
+        return self.stats
+
+
+_global_predictor = None
+
+
+def forecast_monthly(recent_history, latest_month, forecast_months=1):
+    global _global_predictor
+    if _global_predictor is None:
+        _global_predictor = MonthlyEMSPredictor()
+    return _global_predictor.forecast_monthly(recent_history, latest_month, forecast_months)
+
+
+# =========================================================
+# 月度用電量預測：網頁畫面（原 monthly_app.py）
+# =========================================================
+# ---- 校園電度電費 Excel（與版本 A 分頁一相同的檔案與讀取規則）----
+CAMPUS_SHEET = "107-113各月度數費用合併"
+CAMPUS_YEARS = {2018: "107年", 2019: "108年", 2020: "109年", 2021: "110年",
+                2022: "111年", 2023: "112年", 2024: "113年"}
+CAMPUS_LOCATIONS = ["不分區 (全校總用電)", "行政區", "商學", "校友", "男", "女", "中科", "文創"]
+
+_UNIT_EN = {"度": "kWh", "度數": "kWh", "元": "NTD"}
+
+
+def _en_unit(u):
+    """圖表只用英文標籤（雲端環境沒有中文字型，中文會變方框）。"""
+    u = (u or "").strip()
+    return _UNIT_EN.get(u, u if (u and u.isascii()) else "unit")
+
+
+# ---------------------------------------------------------
+# 資料讀取
+# ---------------------------------------------------------
+def _campus_year_row(df_excel, target_mco, location):
+    """與版本 A 分頁一完全相同的規則，取出某年某地點的 12 個月度數。"""
+    if location == "不分區 (全校總用電)":
+        recs = []
+        for idx, row in df_excel.iterrows():
+            val = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ""
+            if val == "總和":
+                for prev in range(idx - 1, max(-1, idx - 10), -1):
+                    if target_mco in str(df_excel.iloc[prev, 0]):
+                        recs.append(row.iloc[1:13].values)
+                        break
+        if len(recs) >= 2:
+            return np.array(recs[0], dtype=float) + np.array(recs[1], dtype=float)
+        return None
+
+    block = None
+    for idx, row in df_excel.iterrows():
+        val = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ""
+        if target_mco in val and "度數" not in val and "費用" not in val:
+            block = target_mco
+            continue
+        elif any(y in val for y in CAMPUS_YEARS.values()) and val != target_mco:
+            block = None
+        if block == target_mco and val == location:
+            return row.iloc[1:13].values
+    return None
+
+
+def load_campus_series(xl, sheet, location):
+    """把 107～113 年各 12 個月的度數接成一條 84 個月的月度序列。"""
+    df_excel = xl.parse(sheet, header=None)
+    rows, missing = [], []
+    for year, mco in CAMPUS_YEARS.items():
+        data = _campus_year_row(df_excel, mco, location)
+        if data is None:
+            missing.append(mco)
+            continue
+        vals = pd.to_numeric(pd.Series(data), errors="coerce").to_numpy()
+        rows.extend((year, m, v) for m, v in enumerate(vals, start=1))
+    if missing:
+        raise ValueError(f"在檔案中找不到 {'、'.join(missing)} 的【{location}】資料")
+    tbl = pd.DataFrame(rows, columns=["year", "month", "kwh"])
+    return build_monthly_series(tbl, "year", "month", "kwh", roc_year=False)
+
+
+def _read_upload(file):
+    name = file.name.lower()
+    if name.endswith((".xlsx", ".xls")):
+        xl = pd.ExcelFile(file)
+        sheet = st.selectbox("工作表", xl.sheet_names, key="monthly_custom_sheet")
+        header = st.number_input("標題列位置（第一列為 0）", 0, 50, 0, key="monthly_custom_header")
+        return xl.parse(sheet, header=int(header))
+    try:
+        return pd.read_csv(file, encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        file.seek(0)
+        return pd.read_csv(file, encoding="cp950")
+
+
+def _guess(cols, keys, default):
+    for i, c in enumerate(cols):
+        if any(k in str(c) for k in keys):
+            return i
+    return min(default, len(cols) - 1)
+
+
+def _clean_digits(df, cols):
+    """「107年」「1月」這類文字，只保留數字部分。"""
+    d = df.copy()
+    for c in cols:
+        d[c] = d[c].astype(str).str.extract(r"(\d+)")[0]
+    return d
+
+
+# ---------------------------------------------------------
+# 圖表與表格
+# ---------------------------------------------------------
+def _metrics_table(metrics):
+    rows = []
+    for model, by_split in metrics.items():
+        for split, m in by_split.items():
+            rows.append({"模型": model, "資料集": split, "MAPE (%)": round(m["MAPE_%"], 2),
+                         "RMSE": round(m["RMSE"], 2), "MAE": round(m["MAE"], 2)})
+    return pd.DataFrame(rows)
+
+
+def _plot_predictions(frame, unit):
+    fig, ax = plt.subplots(figsize=(11, 4.5))
+    ax.plot(frame.index, frame["actual"], color="black", marker="o", label="Actual")
+    colors = {"seasonal_naive": "tab:orange", "holt_winters": "tab:green", "lstm": "tab:red"}
+    for m in [c for c in frame.columns if c in colors]:
+        ax.plot(frame.index, frame[m], color=colors[m], marker="x", linestyle="--", label=m)
+    test_start = frame.index[frame["split"] == "test"][0]
+    ax.axvline(test_start, color="gray", linestyle=":", label="Test start")
+    ax.set_title("Monthly Forecast Result (Validation & Test)")
+    ax.set_xlabel("Month")
+    ax.set_ylabel(f"Monthly value ({_en_unit(unit)})")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    return fig
+
+
+def _plot_forecast(series, months, values, label, unit):
+    hist = series.iloc[-36:]
+    fig, ax = plt.subplots(figsize=(11, 4.5))
+    ax.plot(hist.index, hist.values, color="black", marker="o", label="History")
+    x = pd.to_datetime([m + "-01" for m in months])
+    ax.plot(x, values, color="tab:red", marker="o", linestyle="--", label=label)
+    ax.set_title("Monthly Forecast")
+    ax.set_xlabel("Month")
+    ax.set_ylabel(f"Monthly value ({_en_unit(unit)})")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------
+# 兩種資料來源：各自回傳 (series, 顯示名稱, 單位, 狀態識別 key)，或 None
+# ---------------------------------------------------------
+def _source_campus():
+    file = st.file_uploader("請上傳校園電度電費 Excel 統計檔案（與版本 A 分頁一相同的檔案）",
+                            type=["xlsx", "xls"], key="monthly_campus_excel")
+    if file is None:
+        st.info("💡 請先上傳 107～113 年的電度電費 Excel，系統會自動取出各年 12 個月的用電度數，共 84 個月。")
+        return None
+    try:
+        xl = pd.ExcelFile(file)
+        default = CAMPUS_SHEET if CAMPUS_SHEET in xl.sheet_names else xl.sheet_names[0]
+        sheet = st.selectbox("資料工作表 (Sheet)", xl.sheet_names,
+                             index=xl.sheet_names.index(default), key="monthly_campus_sheet")
+        location = st.selectbox("分析地點 / 區域 / 大樓", CAMPUS_LOCATIONS, key="monthly_campus_loc")
+        series = load_campus_series(xl, sheet, location)
+    except Exception as e:
+        st.error(f"❌ 讀取校園 Excel 失敗：{e}")
+        return None
+    return series, f"度數（{location}）", "kWh", ("campus", file.name, sheet, location)
+
+
+def _source_custom():
+    file = st.file_uploader("上傳月度資料（CSV 或 Excel）", type=["csv", "xlsx", "xls"],
+                            key="monthly_upload")
+    if file is None:
+        st.info("資料需要有「年」「月」「數值（度數或電費）」三種欄位，每個月一列。")
+        return None
+    try:
+        df = _read_upload(file)
+    except Exception as e:
+        st.error(f"讀取檔案失敗：{e}")
+        return None
+    st.dataframe(df.head(10), use_container_width=True)
+
+    cols = [str(c) for c in df.columns]
+    df.columns = cols
+    c1, c2, c3 = st.columns(3)
+    ycol = c1.selectbox("年份欄位", cols, index=_guess(cols, ["年"], 0))
+    mcol = c2.selectbox("月份欄位", cols, index=_guess(cols, ["月"], 1))
+    vcol = c3.selectbox("數值欄位（度數或電費）", cols,
+                        index=_guess(cols, ["度數", "電費", "kWh"], 2))
+    c4, c5 = st.columns(2)
+    roc = c4.radio("年份格式", ["民國年（107）", "西元年（2018）"], horizontal=True).startswith("民國")
+    unit = c5.text_input("單位", value="kWh")
+    try:
+        series = build_monthly_series(_clean_digits(df, [ycol, mcol]), ycol, mcol, vcol, roc_year=roc)
+    except Exception as e:
+        st.error(f"資料整理失敗：{e}")
+        return None
+    return series, vcol, unit, ("custom", file.name, ycol, mcol, vcol)
+
+
+# ---------------------------------------------------------
+# 共同流程：切分 -> 訓練評估 -> 預測
+# ---------------------------------------------------------
+def _pipeline(series, label, unit, key):
+    try:
+        train, val, test = split_5_1_1(series)
+    except Exception as e:
+        st.error(f"資料切分失敗：{e}")
+        return
+
+    st.success(
+        f"共 {len(series)} 個月（{series.index[0]:%Y-%m} ～ {series.index[-1]:%Y-%m}）　"
+        f"訓練 {len(train)}／驗證 {len(val)}／測試 {len(test)} 個月"
+    )
+    st.line_chart(series.rename(label))
+
+    st.subheader("訓練與評估")
+    try:
+        import statsmodels  # noqa: F401
+        has_hw = True
+    except ImportError:
+        has_hw = False
+    use_hw = st.checkbox("加入 Holt-Winters 比較", value=has_hw, disabled=not has_hw)
+    if not has_hw:
+        st.caption("未安裝 statsmodels，已略過 Holt-Winters（requirements.txt 加入 statsmodels 即可啟用）。")
+    epochs = st.slider("LSTM 最大訓練輪數（會自動提早停止）", 50, 1000, 300, step=50)
+
+    if st.button("開始訓練並評估", type="primary"):
+        with st.spinner("訓練中，請稍候…"):
+            try:
+                res = run_experiment(series, out_dir=str(ASSET_DIR), target_name=label,
+                                        unit=unit, use_holt_winters=use_hw, epochs=epochs)
+                st.session_state["monthly_result"] = {"res": res, "key": key}
+            except Exception as e:
+                st.error(f"訓練失敗：{e}")
+
+    saved = st.session_state.get("monthly_result")
+    if not (saved and saved["key"] == key):
+        return
+    res = saved["res"]
+    st.write(f"驗證集表現最佳的模型：**{res['best_model']}**")
+    st.dataframe(_metrics_table(res["metrics"]), use_container_width=True, hide_index=True)
+    st.pyplot(_plot_predictions(res["predictions"], unit))
+    st.caption("LSTM 的驗證集同時用於提早停止，所以驗證集成績略偏樂觀；測試集才是最終成績。"
+               "LSTM 必須勝過「seasonal_naive（去年同月）」才有意義。")
+
+    st.subheader("預測未來月份")
+    n_ahead = st.number_input("預測幾個月", 1, 12, 3)
+    if st.button("執行預測"):
+        predictor = MonthlyEMSPredictor()
+        out = predictor.forecast_monthly(series.to_numpy(), series.index[-1], int(n_ahead))
+        if out["ai_valid"] == 1:
+            vals, line_label = out["forecast_values"], "LSTM forecast"
+            st.success("LSTM 預測成功")
+        else:
+            vals, line_label = out["fallback_values"], "Fallback (same month last year)"
+            st.warning(f"LSTM 無法使用：{out['error_reason']}")
+        if vals is None:
+            st.error("也無法產生備援值。")
+        else:
+            tbl = pd.DataFrame({"月份": out["prediction_months"], f"預測值 ({unit})": vals})
+            st.dataframe(tbl, use_container_width=True, hide_index=True)
+            st.pyplot(_plot_forecast(series, out["prediction_months"], vals, line_label, unit))
+            st.download_button("下載預測結果 CSV", tbl.to_csv(index=False).encode("utf-8-sig"),
+                               "monthly_forecast.csv", "text/csv")
+        with st.expander("系統稽核報表"):
+            st.json(predictor.get_system_audit_report())
+
+
+# ---------------------------------------------------------
+# 主畫面
+# ---------------------------------------------------------
+def render_monthly_tab():
+    st.header("📅 月度用電量預測")
+    st.caption("使用真實月度資料，不經過正弦波還原。切分方式為時間順序 5:1:1（訓練／驗證／測試）。")
+
+    source = st.radio("資料來源", ["校園電度電費 Excel（107～113 年）", "自訂檔案（CSV／Excel，年月數值欄位）"],
+                      horizontal=True, key="monthly_source")
+    got = _source_campus() if source.startswith("校園") else _source_custom()
+    if got is None:
+        return
+    _pipeline(*got)
+
 
 st.set_page_config(page_title="微電網 AI 預測與分析系統", layout="wide")
 st.title("⚡ 微電網 EMS 智慧用電分析與 AI 預測平台")
-st.markdown("結合**校園長短期用電統計分析**與 **LSTM 五大防禦即時預測**。")
-
-@st.cache_resource
-def load_predictor():
-    return EMSLoadPredictor()
-
-predictor = load_predictor()
-
-st.sidebar.header("🛡️ 系統防禦與狀態")
-if predictor.is_ready:
-    st.sidebar.success("✅ AI 模型與防禦引擎已就緒")
-    st.sidebar.info(f"模型版本: {predictor.model_version}\n預測步長: {predictor.horizon_min} 分鐘")
-    if hasattr(predictor, "get_system_audit_report"):
-        with st.sidebar.expander("查看系統稽核計數"):
-            st.json(predictor.get_system_audit_report())
-else:
-    st.sidebar.error(f"❌ 錯誤: {predictor.init_error}")
+st.markdown("結合**校園長短期用電統計分析**與 **月度用電量 AI 預測**。")
 
 tab1, tab2 = st.tabs([
     "📈 1. 歷史用電統計與動態趨勢分析", 
-    "🚀 2. 即時歷史負載上傳與 AI 預測系統 "
+    "🚀 2. 月度用電量 AI 預測系統"
 ])
 
 with tab1:
@@ -160,275 +823,5 @@ with tab1:
         st.info("💡 請先上傳您的電度電費 Excel 統計檔案，即可檢視月統計與趨勢圖。")
 
 with tab2:
-    st.header("🚀 即時歷史負載上傳與 AI 預測系統")
-
-    pred_version = st.radio(
-        "請選擇預測版本：",
-        ["版本 A：15 分鐘高頻（預測 1 天）", "版本 B：月度用電量（真實月資料）"],
-        horizontal=True, key="pred_version",
-    )
-    if pred_version.startswith("版本 B"):
-        if render_monthly_tab is None:
-            st.error(f"❌ 無法載入月度預測頁面：{_monthly_import_error}")
-            st.info("請確認 GitHub 倉庫中有 monthly_app.py，以及 month_infer.py（或 monthly_forecast.py）。")
-        else:
-            render_monthly_tab()
-        st.stop()  # 分頁二是程式最後一段，停在這裡不影響分頁一
-    
-    with st.expander("📌 點此查看【預測檔案】格式與轉換說明", expanded=False):
-        st.markdown("""
-        * **支援檔案格式**：
-          1. **CSV 檔案**：傳統高頻 15 分鐘負載數據（需包含 Timestamp 欄位）。
-          2. **Excel 檔案**：上傳後系統會自動轉換為完整年度高頻序列，並根據你選擇的時間點自動切片預測！
-        """)
-
-    file_type_choice = st.radio("請選擇您要上傳的檔案類型進行預測：", ["高頻 CSV 檔案", "長短期 Excel 統計檔案 "], horizontal=True)
-
-    if 'active_history_series' not in st.session_state:
-        st.session_state['active_history_series'] = None
-    if 'current_data_year' not in st.session_state:
-        st.session_state['current_data_year'] = 2024
-    if 'series_is_synthetic' not in st.session_state:
-        st.session_state['series_is_synthetic'] = False
-
-    if file_type_choice == "高頻 CSV 檔案":
-        uploaded_csv = st.file_uploader("請上傳包含 15 分鐘高頻歷史用電的 CSV 檔案", type=["csv"], key="pred_csv_uploader")
-        if uploaded_csv is not None:
-            try:
-                df_uploaded = pd.read_csv(uploaded_csv)
-                
-                if 'Timestamp' in df_uploaded.columns:
-                    df_uploaded['Timestamp'] = pd.to_datetime(df_uploaded['Timestamp']).dt.tz_localize(None)
-                    df_uploaded = df_uploaded.set_index('Timestamp')
-                
-                numeric_columns = df_uploaded.select_dtypes(include=[np.number]).columns.tolist()
-                if numeric_columns:
-                    selected_col = st.selectbox("請選擇代表負載數值 (kW) 的欄位名稱", numeric_columns, key="pred_col_csv")
-                    series_data = df_uploaded[selected_col].dropna()
-                    
-                    st.session_state['active_history_series'] = series_data
-                    st.session_state['series_is_synthetic'] = False
-                    st.session_state['current_data_year'] = series_data.index.min().year
-                    
-                    st.success(f"✅ 成功讀取 CSV 並載入記憶體 (共 {len(series_data)} 筆，區間: {series_data.index.min().strftime('%Y-%m-%d')} ~ {series_data.index.max().strftime('%Y-%m-%d')})")
-            except Exception as e:
-                st.error(f"❌ 讀取 CSV 發生錯誤: {str(e)}")
-        else:
-            if st.button("📥 載入內建範例測試資料 (CSV 格式)"):
-                sample_data = np.linspace(500, 800, 200)
-                sample_index = pd.date_range(start='2024-01-01 00:00:00', periods=len(sample_data), freq='15min')
-                st.session_state['active_history_series'] = pd.Series(sample_data, index=sample_index)
-                st.session_state['series_is_synthetic'] = True
-                st.session_state['current_data_year'] = 2024
-                st.success(f"已載入內建範例數據（共 {len(sample_data)} 筆）")
-
-    else:
-        uploaded_excel_tab2 = st.file_uploader("請上傳您的電度電費 Excel 統計檔案 (.xlsx)", type=["xlsx", "xls"], key="pred_excel_uploader")
-        
-        if uploaded_excel_tab2 is not None:
-            try:
-                sel_year2 = 2024
-
-                xls2 = pd.ExcelFile(uploaded_excel_tab2)
-                default_sheet2 = '107-113各月度數費用合併' if '107-113各月度數費用合併' in xls2.sheet_names else xls2.sheet_names[0]
-                sheet_to_use2 = st.selectbox("選擇資料工作表 (Sheet)", xls2.sheet_names, index=xls2.sheet_names.index(default_sheet2) if default_sheet2 in xls2.sheet_names else 0, key="sheet_tab2")
-                
-                df_excel2 = pd.read_excel(uploaded_excel_tab2, sheet_name=sheet_to_use2, header=None)
-                
-                selected_excel_year = st.selectbox("選擇轉換與預測的西元年份", [2018, 2019, 2020, 2021, 2022, 2023, 2024], index=6, key="excel_pred_year")
-                sel_year2 = selected_excel_year
-                st.session_state['current_data_year'] = sel_year2
-
-                mco_map2 = {2018: '107年', 2019: '108年', 2020: '109年', 2021: '110年', 2022: '111年', 2023: '112年', 2024: '113年'}
-                t_mco2 = mco_map2.get(sel_year2, '113年')
-
-                loc_opts2 = ['不分區 (全校總用電)', '行政區', '商學', '校友', '男', '女', '中科', '文創']
-                sel_loc2 = st.selectbox("選擇轉換大樓/區域", loc_opts2, key="conv_loc")
-
-                target_data2 = None
-                if sel_loc2 == '不分區 (全校總用電)':
-                    recs = []
-                    for idx, row in df_excel2.iterrows():
-                        val = str(row.iloc[0]).strip()
-                        if val == '總和':
-                            for prev in range(idx-1, max(-1, idx-10), -1):
-                                if t_mco2 in str(df_excel2.iloc[prev, 0]):
-                                    recs.append(row.iloc[1:13].values)
-                                    break
-                    if len(recs) >= 2:
-                        target_data2 = np.array(recs[0], dtype=float) + np.array(recs[1], dtype=float)
-                else:
-                    cur_block = None
-                    for idx, row in df_excel2.iterrows():
-                        val = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ""
-                        if t_mco2 in val and '度數' not in val and '費用' not in val:
-                            cur_block = t_mco2
-                            continue
-                        elif any(y in val for y in ['107年', '108年', '109年', '110年', '111年', '112年', '113年']) and val != t_mco2:
-                            cur_block = None
-                        if cur_block == t_mco2 and val == sel_loc2:
-                            target_data2 = row.iloc[1:13].values
-                            break
-
-                if target_data2 is not None:
-                    high_freq_list = []
-                    for m_idx, m_kwh in enumerate(target_data2, start=1):
-                        m_kwh = 0.0 if pd.isna(m_kwh) else float(m_kwh)
-                        days_in_m = calendar.monthrange(sel_year2, m_idx)[1]
-                        intervals = days_in_m * 96
-                        day_idx = np.arange(intervals)
-                        hour_d = (day_idx % 96) * 0.25
-                        
-                        profile = 1.0 + 0.3 * np.sin(2 * np.pi * (hour_d - 6) / 24)
-                        profile = np.clip(profile, 0.4, 1.6)
-                        
-                        avg_kw = m_kwh / (days_in_m * 24) if days_in_m > 0 else 0
-                        p_mean = np.mean(profile)
-                        if p_mean > 0:
-                            profile = profile / p_mean
-                        kw_series = avg_kw * profile
-                        high_freq_list.extend(kw_series.tolist())
-
-                    full_time_index = pd.date_range(start=f'{sel_year2}-01-01 00:00:00', periods=len(high_freq_list), freq='15min')
-                    series_data = pd.Series(high_freq_list, index=full_time_index)
-                    st.session_state['active_history_series'] = series_data
-                    st.session_state['series_is_synthetic'] = True
-                    st.success(f"✅ 成功將 {sel_year2} 年【{sel_loc2}】轉換為高頻序列並快取 (共 {len(high_freq_list)} 筆)")
-                    st.warning("⚠️ 此高頻序列是由月度度數以正弦波合成的，並非真實量測。預測曲線反映的是合成規律，僅供展示。若要以真實月資料預測，請改用左側的「版本 B」。")
-                else:
-                    st.warning(f"⚠️ 在檔案中找不到 {sel_year2} 年 ({t_mco2}) 對應的【{sel_loc2}】數值。")
-
-            except Exception as e:
-                st.error(f"❌ Excel 轉換處理時發生錯誤: {str(e)}")
-
-    st.markdown("---")
-    st.subheader("⏱️ 設定預測截止時間點")
-    
-    if st.session_state['active_history_series'] is not None and len(st.session_state['active_history_series']) > 0:
-        full_series = st.session_state['active_history_series']
-        min_date = full_series.index.min().date()
-        max_date = full_series.index.max().date()
-        default_date = max_date
-
-        col_d, col_t = st.columns(2)
-        with col_d:
-            selected_date = st.date_input(
-                "選擇預測基準日期", 
-                value=default_date,
-                min_value=min_date,
-                max_value=max_date,
-                help=f"已嚴格限制在資料實際區間內 ({min_date} ~ {max_date})"
-            )
-        with col_t:
-            selected_time = st.time_input(
-                "選擇預測基準時間", 
-                value=pd.to_datetime("00:00:00").time(),
-                help="選擇當天的小時與分鐘"
-            )
-
-        input_timestamp = f"{selected_date} {selected_time}"
-        
-        st.markdown("---")
-        if st.button("🚀 開始執行單日 AI 預測與五大防禦檢核", type="primary"):
-            if not predictor.is_ready:
-                st.error(f"❌ 模型尚未就緒，無法進行預測。原因: {predictor.init_error}")
-            else:
-                try:
-                    with st.spinner("正在進行單日五大防禦檢核與模型推論中..."):
-                        
-                        parsed_input_dt = pd.to_datetime(input_timestamp)
-                        if parsed_input_dt.tzinfo is not None:
-                            parsed_input_dt = parsed_input_dt.tz_localize(None)
-                        
-                        if full_series.index.tz is not None:
-                            full_series.index = full_series.index.tz_localize(None)
-                        
-                        sliced_history = full_series[full_series.index <= parsed_input_dt]
-
-                        # 多取最近 7 天，供備援（同時段平均）使用；模型本身只會用最後 lookback_steps 筆
-                        history_slice = sliced_history.iloc[-7 * 96:]
-                        if len(history_slice) < predictor.lookback_steps:
-                            st.warning(f"⚠️ 指定時間點之前只有 {len(history_slice)} 筆資料，不足 {predictor.lookback_steps} 筆，系統將啟動防禦機制。")
-
-                        latest_ts = history_slice.index[-1] if len(history_slice) > 0 else parsed_input_dt
-                        result = predictor.forecast_load_kw(
-                            history_slice.tolist(),
-                            latest_ts,
-                            forecast_days=1,
-                            history_timestamps=history_slice.index,
-                        )
-
-                    st.markdown("---")
-                    st.subheader("📊 單日預測結果與系統稽核")
-
-                    if result and result.get("ai_valid") == 1:
-                        st.success("✅ 推論成功：資料完全合規，AI 模型正常預測！")
-                        if st.session_state.get('series_is_synthetic'):
-                            st.warning("⚠️ 目前的歷史資料是合成資料（月度度數經正弦波還原），預測形狀會非常相似，僅供展示，不代表真實用電預測。")
-                        
-                        pred_loads = result.get("forecast_load_kw") or result.get("forecast_load_kWh")
-                        pred_times = result.get("prediction_timestamps")
-                        
-                        df_chart = pd.DataFrame({
-                            "預測時間": pd.to_datetime(pred_times),
-                            "AI 預測負載 (kW)": pred_loads
-                        }).set_index("預測時間")
-
-                        fig, ax = plt.subplots(figsize=(12, 5))
-                        ax.plot(
-                            df_chart.index, 
-                            df_chart['AI 預測負載 (kW)'], 
-                            color='crimson', 
-                            linewidth=1.8, 
-                            label='AI Forecast Load (1-Day Horizon)'
-                        )
-                        ax.set_title(f'Load Forecasting Result (Up to {input_timestamp})', fontsize=14, fontweight='bold')
-                        ax.set_xlabel('Test Timeline (15-min Intervals)', fontsize=12)
-                        ax.set_ylabel('Power Load (kW)', fontsize=12)
-                        ax.grid(True, linestyle='--', alpha=0.5)
-                        ax.legend(loc='upper right', fontsize=11)
-
-                        fig.tight_layout()
-                        st.pyplot(fig)
-                        
-                        with st.expander("查看詳細 96 步預測數據表格"):
-                            st.dataframe(df_chart)
-                            
-                        csv_data = df_chart.to_csv().encode('utf-8')
-                        st.download_button(
-                            label="📥 下載預測結果 CSV 檔案",
-                            data=csv_data,
-                            file_name="forecast_result_1day.csv",
-                            mime="text/csv",
-                        )
-                    else:
-                        st.error("❌ 系統防禦機制已攔截！(ai_valid = 0)")
-                        st.warning(f"**觸發錯誤原因**：{result.get('error_reason')}")
-                        st.info(f"🛡️ **啟動備援策略 (Fallback)**：`{result.get('fallback_strategy')}`")
-
-                        fb_loads = result.get("fallback_load_kw")
-                        fb_times = result.get("prediction_timestamps")
-                        if fb_loads and fb_times:
-                            df_fb = pd.DataFrame({
-                                "預測時間": pd.to_datetime(fb_times),
-                                "備援負載 (kW)": fb_loads
-                            }).set_index("預測時間")
-
-                            fig_fb, ax_fb = plt.subplots(figsize=(12, 5))
-                            ax_fb.plot(df_fb.index, df_fb['備援負載 (kW)'], color='darkorange',
-                                       linewidth=1.8, linestyle='--', label='Fallback Load (NOT AI forecast)')
-                            ax_fb.set_title(f'Fallback Load (Up to {input_timestamp})', fontsize=14, fontweight='bold')
-                            ax_fb.set_xlabel('Timeline (15-min Intervals)', fontsize=12)
-                            ax_fb.set_ylabel('Power Load (kW)', fontsize=12)
-                            ax_fb.grid(True, linestyle='--', alpha=0.5)
-                            ax_fb.legend(loc='upper right', fontsize=11)
-                            fig_fb.tight_layout()
-                            st.pyplot(fig_fb)
-                            st.caption("橘色虛線是備援值（歷史同時段推估），不是 AI 模型的預測結果。")
-                        else:
-                            st.caption("輸入資料不足或有問題，無法產生備援值。")
-
-                except Exception as e:
-                    st.error(f"❌ 執行預測過程發生例外錯誤: {str(e)}")
-    else:
-        st.info("💡 請先在上方的檔案上傳區完成 CSV 或 Excel 檔案載入，即可設定預測時間點並執行 AI 模型。")
+    st.header("🚀 月度用電量 AI 預測系統")
+    render_monthly_tab()
