@@ -629,7 +629,8 @@ def _pipeline(series, label, unit, key):
             st.error("也無法產生備援值。")
         else:
             tbl = pd.DataFrame({"月份": out["prediction_months"], f"預測值 ({unit})": vals})
-            st.dataframe(tbl, use_container_width=True, hide_index=True)
+            with st.expander("📋 點此展開／收合預測數據表格", expanded=False):
+                st.dataframe(tbl, use_container_width=True, hide_index=True)
             st.pyplot(_plot_forecast(series, out["prediction_months"], vals, line_label, unit))
             st.download_button("下載預測結果 CSV", tbl.to_csv(index=False).encode("utf-8-sig"),
                                "monthly_forecast.csv", "text/csv")
