@@ -344,21 +344,24 @@ class MonthlyEMSPredictor:
             preds = []
 
             # 💡 根據最佳模型名稱動態選擇預測方式！
-            if self.best_model_name == "holt_winters":
+           if self.best_model_name == "holt_winters":
                 # 使用 Holt-Winters 進行多步滾動預測
                 from statsmodels.tsa.holtwinters import ExponentialSmoothing
                 full_history = np.array(recent_history, dtype=float)
                 for i in range(len(months)):
-                    # 動態擬合並預測下一期
                     fit = ExponentialSmoothing(
                         full_history, trend="add", seasonal="add",
                         seasonal_periods=12, initialization_method="estimated",
                     ).fit()
                     p = float(fit.forecast(1)[0])
-                    if not np.isfinite(p) or p < 0 or p > upper:
+                    
+                    # 💡 加上防禦性限制：用電量不可能小於 0，若出現負數或異常則夾緊在 0 或使用下限
+                    if not np.isfinite(p):
                         return self._fail("model_output_invalid", f"第 {i + 1} 個月預測值異常：{p}", months, window)
+                    if p < 0:
+                        p = 0.0  # 強制夾緊為 0，避免負數崩潰
+                        
                     preds.append(p)
-                    # 將預測值加入歷史中繼續滾動下一期
                     full_history = np.append(full_history, p)
 
             elif self.best_model_name == "seasonal_naive":
