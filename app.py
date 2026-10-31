@@ -610,16 +610,13 @@ def _pipeline(series, label, unit, key):
         return
     res = saved["res"]
     st.write(f"驗證集表現最佳的模型：**{res['best_model']}**")
-    
-    # 🔽 使用 st.expander 將評估指標表格收納起來
     with st.expander("📋 點此展開／收合模型評估指標表 (Metrics)", expanded=False):
         st.dataframe(_metrics_table(res["metrics"]), use_container_width=True, hide_index=True)
-        
     st.pyplot(_plot_predictions(res["predictions"], unit))
     st.caption("LSTM 的驗證集同時用於提早停止，所以驗證集成績略偏樂觀；測試集才是最終成績。")
 
     st.subheader("預測未來月份")
-    n_ahead = st.number_input("預測幾個月", 1, 12, 3)
+    n_ahead = 12  # 直接固定預測 12 個月（未來一年）
     if st.button("執行預測"):
         predictor = MonthlyEMSPredictor()
         out = predictor.forecast_monthly(series.to_numpy(), series.index[-1], int(n_ahead))
@@ -643,7 +640,7 @@ def _pipeline(series, label, unit, key):
 
 
 def render_monthly_tab():
-    
+    st.header("📅 月度用電量預測")
 
     source = st.radio("資料來源", ["校園電度電費 Excel（107～113 年）", "自訂檔案（CSV／Excel，年月數值欄位）"],
                       horizontal=True, key="monthly_source")
@@ -663,7 +660,7 @@ tab1, tab2 = st.tabs([
 ])
 
 with tab1:
-    st.header("📈 1. 歷史用電統計與動態趨勢分析")
+    st.header("📈 歷史用電統計與動態趨勢分析")
     
     with st.expander("📌 點此查看【歷史統計檔案】的規格與欄位說明", expanded=False):
         st.markdown("""
@@ -781,5 +778,5 @@ with tab1:
         st.info("💡 請先上傳您的電度電費 Excel 統計檔案，即可檢視月統計與趨勢圖。")
 
 with tab2:
-    st.header("🚀 2. 月度用電量 AI 預測系統")
+    st.header("🚀 月度用電量 AI 預測系統")
     render_monthly_tab()
