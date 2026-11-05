@@ -497,7 +497,7 @@ def _metrics_table(metrics):
     return pd.DataFrame(rows)
 
 
-def _plot_predictions(frame, unit):
+def _plot_predictions_mpl(frame, unit):
     fig, ax = plt.subplots(figsize=(11, 4.5))
     ax.plot(frame.index, frame["actual"], color="black", marker="o", label="Actual")
     colors = {"seasonal_naive": "tab:orange", "holt_winters": "tab:green", "lstm": "tab:red"}
@@ -513,6 +513,87 @@ def _plot_predictions(frame, unit):
     fig.autofmt_xdate()
     fig.tight_layout()
     return fig
+
+
+def _style_prediction_fig(fig, title, unit, x_title="Month"):
+    """讓 AI 預測圖和「用電統計」圖用同一種版面：白底、互動、滑過顯示同月所有數值。"""
+    fig.update_layout(
+        title=title,
+        xaxis=dict(title=x_title, tickformat="%Y-%m"),
+        yaxis=dict(title=f"Monthly value ({_en_unit(unit)})", tickformat=","),
+        template="plotly_white", height=450, hovermode="x unified",
+        legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5),
+        margin=dict(t=60, b=40),
+    )
+
+
+def _show_predictions(frame, unit):
+    """驗證集＋測試集：真實值與三個模型的預測對照。優先 Plotly，沒安裝時退回 Matplotlib。"""
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        st.pyplot(_plot_predictions_mpl(frame, unit))
+        return
+
+    u = _en_unit(unit)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=frame.index, y=frame["actual"], mode="lines+markers", name="Actual",
+        line=dict(color="black", width=3), marker=dict(size=9),
+        hovertemplate=f"%{{y:,.0f}} {u}"))
+    styles = {"seasonal_naive": "#ff7f0e", "holt_winters": "#2ca02c", "lstm": "#d62728"}
+    for m in [c for c in frame.columns if c in styles]:
+        fig.add_trace(go.Scatter(
+            x=frame.index, y=frame[m], mode="lines+markers", name=m,
+            line=dict(color=styles[m], width=2.5, dash="dash"),
+            marker=dict(size=8, symbol="x"), hovertemplate=f"%{{y:,.0f}} {u}"))
+
+    test_start = frame.index[frame["split"] == "test"][0].strftime("%Y-%m-%d")
+    last = frame.index[-1].strftime("%Y-%m-%d")
+    fig.add_shape(type="rect", xref="x", yref="paper", x0=test_start, x1=last, y0=0, y1=1,
+                  fillcolor="rgba(120,120,120,0.10)", line_width=0, layer="below")
+    fig.add_shape(type="line", xref="x", yref="paper", x0=test_start, x1=test_start, y0=0, y1=1,
+                  line=dict(color="gray", width=1.5, dash="dot"))
+    fig.add_annotation(x=test_start, y=1, xref="x", yref="paper", text="Test period",
+                       showarrow=False, xanchor="left", yanchor="top", font=dict(color="gray", size=12))
+    _style_prediction_fig(fig, "Monthly Forecast Result (Validation & Test)", unit)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _show_forecast(series, months, values, label, unit):
+    """未來月份預測：去年同月真實值與預測值。優先 Plotly，沒安裝時退回 Matplotlib。"""
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        st.pyplot(_plot_forecast_mpl(series, months, values, label, unit))
+        return
+
+    u = _en_unit(unit)
+    x = pd.to_datetime([m + "-01" for m in months])
+    prev_x, prev_vals = [], []
+    for m in months:
+        dt = pd.to_datetime(m + "-01") - pd.DateOffset(years=1)
+        if dt in series.index:
+            prev_x.append(pd.to_datetime(m + "-01"))
+            prev_vals.append(float(series.loc[dt]))
+
+    fig = go.Figure()
+    if prev_vals:
+        fig.add_trace(go.Scatter(
+            x=prev_x, y=prev_vals, mode="lines+markers", name="Actual (Last Year)",
+            line=dict(color="#1f77b4", width=3), marker=dict(size=9, symbol="square"),
+            hovertemplate=f"%{{y:,.0f}} {u}"))
+    fig.add_trace(go.Scatter(
+        x=x, y=list(values), mode="lines+markers", name=label,
+        line=dict(color="#d62728", width=3, dash="dash"), marker=dict(size=9),
+        hovertemplate=f"%{{y:,.0f}} {u}"))
+
+    k = int(pd.Series(values).astype(float).idxmax())
+    fig.add_annotation(x=x[k], y=float(values[k]), text=f"Peak: {float(values[k]):,.0f} {u}",
+                       showarrow=True, arrowhead=2, ax=0, ay=-40, font=dict(color="crimson", size=13))
+    _style_prediction_fig(fig, "Monthly Forecast Result", unit)
+    fig.update_xaxes(tickmode="array", tickvals=list(x), ticktext=[d.strftime("%Y-%m") for d in x])
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def _plot_monthly_trend(df_target, year, location):
@@ -558,7 +639,7 @@ def _plot_monthly_trend(df_target, year, location):
     st.pyplot(fig)
 
 
-def _plot_forecast(series, months, values, label, unit):
+def _plot_forecast_mpl(series, months, values, label, unit):
     fig, ax = plt.subplots(figsize=(11, 4.5))
     x = pd.to_datetime([m + "-01" for m in months])
     
@@ -684,7 +765,7 @@ def _pipeline(series, label, unit, key):
     st.write(f"驗證集表現最佳的模型：**{res['best_model']}**")
     with st.expander("📋 點此展開／收合模型評估指標表 (Metrics)", expanded=False):
         st.dataframe(_metrics_table(res["metrics"]), use_container_width=True, hide_index=True)
-    st.pyplot(_plot_predictions(res["predictions"], unit))
+    _show_predictions(res["predictions"], unit)
     st.caption("LSTM 的驗證集同時用於提早停止，所以驗證集成績略偏樂觀；測試集才是最終成績。")
 
     st.subheader("預測未來月份（未來 12 個月）")
@@ -703,7 +784,7 @@ def _pipeline(series, label, unit, key):
             tbl = pd.DataFrame({"月份": out["prediction_months"], f"預測值 ({unit})": vals})
             with st.expander("📋 點此展開／收合預測數據表格", expanded=False):
                 st.dataframe(tbl, use_container_width=True, hide_index=True)
-            st.pyplot(_plot_forecast(series, out["prediction_months"], vals, line_label, unit))
+            _show_forecast(series, out["prediction_months"], vals, line_label, unit)
             st.download_button("下載預測結果 CSV", tbl.to_csv(index=False).encode("utf-8-sig"),
                                "monthly_forecast.csv", "text/csv")
         
