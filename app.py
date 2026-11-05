@@ -499,7 +499,7 @@ def _metrics_table(metrics):
 
 def _plot_predictions_mpl(frame, unit):
     fig, ax = plt.subplots(figsize=(11, 4.5))
-    ax.plot(frame.index, frame["actual"], color="white", marker="o", label="Actual")
+    ax.plot(frame.index, frame["actual"], color="dodgerblue", linewidth=2.5, marker="o", label="Actual")
     colors = {"seasonal_naive": "tab:orange", "holt_winters": "tab:green", "lstm": "tab:red"}
     for m in [c for c in frame.columns if c in colors]:
         ax.plot(frame.index, frame[m], color=colors[m], marker="x", linestyle="--", label=m)
@@ -539,7 +539,7 @@ def _show_predictions(frame, unit):
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=frame.index, y=frame["actual"], mode="lines+markers", name="Actual",
-        line=dict(color="black", width=3), marker=dict(size=9),
+        line=dict(color="dodgerblue", width=3.5), marker=dict(size=10),
         hovertemplate=f"%{{y:,.0f}} {u}"))
     styles = {"seasonal_naive": "#ff7f0e", "holt_winters": "#2ca02c", "lstm": "#d62728"}
     for m in [c for c in frame.columns if c in styles]:
@@ -581,7 +581,7 @@ def _show_forecast(series, months, values, label, unit):
     if prev_vals:
         fig.add_trace(go.Scatter(
             x=prev_x, y=prev_vals, mode="lines+markers", name="Actual (Last Year)",
-            line=dict(color="#1f77b4", width=3), marker=dict(size=9, symbol="square"),
+            line=dict(color="dodgerblue", width=3.5), marker=dict(size=10, symbol="square"),
             hovertemplate=f"%{{y:,.0f}} {u}"))
     fig.add_trace(go.Scatter(
         x=x, y=list(values), mode="lines+markers", name=label,
@@ -652,7 +652,7 @@ def _plot_forecast_mpl(series, months, values, label, unit):
             prev_vals.append(float(series.loc[dt]))
 
     if prev_vals:
-        ax.plot(prev_x, prev_vals, color="tab:blue", marker="s", linestyle="-", label="Actual (Last Year)")
+        ax.plot(prev_x, prev_vals, color="dodgerblue", linewidth=2.5, marker="s", linestyle="-", label="Actual (Last Year)")
 
     ax.plot(x, values, color="tab:red", marker="o", linestyle="--", label=label)
     ax.set_title("Monthly Forecast Result")
