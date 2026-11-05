@@ -499,7 +499,7 @@ def _metrics_table(metrics):
 
 def _plot_predictions_mpl(frame, unit):
     fig, ax = plt.subplots(figsize=(11, 4.5))
-    ax.plot(frame.index, frame["actual"], color="black", marker="o", label="Actual")
+    ax.plot(frame.index, frame["actual"], color="white", marker="o", label="Actual")
     colors = {"seasonal_naive": "tab:orange", "holt_winters": "tab:green", "lstm": "tab:red"}
     for m in [c for c in frame.columns if c in colors]:
         ax.plot(frame.index, frame[m], color=colors[m], marker="x", linestyle="--", label=m)
