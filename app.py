@@ -414,16 +414,21 @@ def _en_unit(u):
 
 def _campus_year_row(df_excel, target_mco, location):
     if location == "不分區 (全校總用電)":
-        recs = []
-        for idx, row in df_excel.iterrows():
-            val = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ""
-            if val == "總和":
-                for prev in range(idx - 1, max(-1, idx - 10), -1):
-                    if target_mco in str(df_excel.iloc[prev, 0]):
-                        recs.append(row.iloc[1:13].values)
-                        break
-        if len(recs) >= 2:
-            return np.array(recs[0], dtype=float) + np.array(recs[1], dtype=float)
+        # 例如 target_mco = "107年" → 找到「107度數」區塊，取其中的「總和」列。
+        # （「107費用」區塊也有「總和」列，但那是電費，不能拿來加總）
+        label = target_mco.replace("年", "度數")
+        n = len(df_excel)
+        for idx in range(n):
+            v = df_excel.iloc[idx, 0]
+            if pd.notna(v) and str(v).strip() == label:
+                for j in range(idx + 1, min(idx + 15, n)):
+                    w = df_excel.iloc[j, 0]
+                    if pd.notna(w) and str(w).strip() == "總和":
+                        vals = pd.to_numeric(
+                            pd.Series(df_excel.iloc[j, 1:13].values), errors="coerce"
+                        ).to_numpy(dtype=float)
+                        vals[vals == 0] = np.nan   # 尚未發生的月份（例如 113 年 11、12 月）在 Excel 裡是 0
+                        return vals
         return None
 
     block = None
@@ -508,6 +513,49 @@ def _plot_predictions(frame, unit):
     fig.autofmt_xdate()
     fig.tight_layout()
     return fig
+
+
+def _plot_monthly_trend(df_target, year, location):
+    """月趨勢圖：優先用 Plotly（可互動、中文不會變方塊）；沒安裝 plotly 時退回 Matplotlib。"""
+    s = df_target["load_kWh"]
+    peak_month, peak = s.idxmax(), float(s.max())
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        go = None
+
+    if go is not None:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=s.index, y=s.values, mode="lines+markers", name=f"{location} Load",
+            line=dict(color="forestgreen", width=3), marker=dict(size=9)))
+        fig.add_annotation(
+            x=peak_month, y=peak, text=f"Peak: {peak:,.0f} kWh", showarrow=True, arrowhead=2,
+            ax=0, ay=-40, font=dict(color="crimson", size=13))
+        fig.update_layout(
+            title=f"{year} {location} Monthly Electricity Load Analysis",
+            xaxis=dict(title=f"Month ({year})", tickmode="array", tickvals=list(s.index),
+                       ticktext=[m.strftime("%b") for m in s.index]),
+            yaxis_title="Power Consumption (kWh / Month)",
+            template="plotly_white", height=450, hovermode="x unified")
+        st.plotly_chart(fig, use_container_width=True)
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(s.index, s.values, marker="o", color="forestgreen", linewidth=2.5, markersize=7,
+            label=f"{location} Load")
+    ax.annotate(f"Peak: {peak:,.0f} kWh", xy=(peak_month, peak), xytext=(0, 15),
+                textcoords="offset points", ha="center", fontweight="bold", color="crimson",
+                arrowprops=dict(arrowstyle="->", color="crimson", lw=1.5))
+    ax.set_title(f"{year} {location} Monthly Electricity Load Analysis", fontsize=14, fontweight="bold")
+    ax.set_xlabel(f"Month ({year})", fontsize=12)
+    ax.set_ylabel("Power Consumption (kWh / Month)", fontsize=12)
+    ax.grid(True, linestyle="--", alpha=0.6)
+    ax.set_xticks(s.index)
+    ax.set_xticklabels([m.strftime("%b") for m in s.index])
+    ax.legend(loc="upper right", fontsize=11)
+    fig.tight_layout()
+    st.pyplot(fig)
 
 
 def _plot_forecast(series, months, values, label, unit):
@@ -730,34 +778,7 @@ with tab1:
                 location_options = ['不分區 (全校總用電)', '行政區', '商學', '校友', '男', '女', '中科', '文創']
                 selected_location = st.selectbox("選擇分析地點 / 區域 / 大樓", location_options, key="trend_location")
 
-            target_row_data = None
-
-            if selected_location == '不分區 (全校總用電)':
-                records_target = []
-                for idx, row in df_excel.iterrows():
-                    val = str(row.iloc[0]).strip()
-                    if val == '總和':
-                        for prev in range(idx-1, max(-1, idx-10), -1):
-                            if target_mco in str(df_excel.iloc[prev, 0]):
-                                records_target.append(row.iloc[1:13].values)
-                                break
-                if len(records_target) >= 2:
-                    table1 = np.array(records_target[0], dtype=float)
-                    table2 = np.array(records_target[1], dtype=float)
-                    target_row_data = table1 + table2
-            else:
-                current_year_block = None
-                for idx, row in df_excel.iterrows():
-                    val = str(row.iloc[0]).strip()
-                    if target_mco in val and '度數' not in val and '費用' not in val:
-                        current_year_block = target_mco
-                        continue
-                    elif any(y in val for y in ['107年', '108年', '109年', '110年', '111年', '112年', '113年']) and val != target_mco:
-                        current_year_block = None
-
-                    if current_year_block == target_mco and val == selected_location:
-                        target_row_data = row.iloc[1:13].values
-                        break
+            target_row_data = _campus_year_row(df_excel, target_mco, selected_location)
 
             if target_row_data is not None:
                 months_range = pd.date_range(start=f'{selected_year}-01-01', end=f'{selected_year}-12-01', freq='MS')
@@ -781,26 +802,7 @@ with tab1:
                     col3.metric("用電最高月份", max_month, f"{max_load:,.2f} kWh")
                     col4.metric("用電最低月份", min_month, f"{min_load:,.2f} kWh")
 
-                    fig, ax = plt.subplots(figsize=(12, 5))
-                    ax.plot(df_target.index, df_target['load_kWh'], marker='o', color='forestgreen', linewidth=2.5, markersize=7, label=f'{selected_location} Load')
-
-                    max_idx = df_target['load_kWh'].argmax()
-                    ax.annotate(f'Peak: {max_load:,.0f} kWh',
-                                 xy=(df_target.index[max_idx], max_load),
-                                 xytext=(0, 15), textcoords='offset points', ha='center',
-                                 fontweight='bold', color='crimson',
-                                 arrowprops=dict(arrowstyle='->', color='crimson', lw=1.5))
-
-                    ax.set_title(f'{selected_year} {selected_location} Monthly Electricity Load Analysis', fontsize=14, fontweight='bold')
-                    ax.set_xlabel(f'Month ({selected_year})', fontsize=12)
-                    ax.set_ylabel('Power Consumption (kWh / Month)', fontsize=12)
-                    ax.grid(True, linestyle='--', alpha=0.6)
-                    ax.set_xticks(df_target.index)
-                    ax.set_xticklabels(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][:len(df_target)])
-                    ax.legend(loc='upper right', fontsize=11)
-
-                    fig.tight_layout()
-                    st.pyplot(fig)
+                    _plot_monthly_trend(df_target, selected_year, selected_location)
                 else:
                     st.warning(f"⚠️ {selected_year} 年的【{selected_location}】目前沒有有效的月用電數值。")
             else:
