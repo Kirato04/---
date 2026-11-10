@@ -363,10 +363,10 @@ def forecast_recursive(model, y_hist, idx_hist, n_months, y_sc, t_hist=None, t_s
 # ---------------------------------------------------------
 # 網站：載入 Colab 訓練好的模型並預測（網頁上不訓練）
 # ---------------------------------------------------------
-MODEL_LABELS = {"lstm_temp": "LSTM（含氣溫）", "lstm_notemp": "LSTM（不含氣溫）", "temp_adjusted": "氣溫修正模型"}
-MODEL_LABELS_EN = {"lstm_temp": "LSTM (with temperature)", "lstm_notemp": "LSTM (no temperature)",
-                   "temp_adjusted": "Temperature-adjusted"}
-MODEL_COLORS = {"lstm_temp": "#d62728", "lstm_notemp": "#9467bd", "temp_adjusted": "#2ca02c"}
+MODEL_LABELS = {"lstm_notemp": "LSTM", "temp_adjusted": "氣溫修正模型"}
+MODEL_LABELS_EN = {"lstm_notemp": "LSTM", "temp_adjusted": "Temperature-adjusted"}
+MODEL_COLORS = {"lstm_notemp": "#d62728", "temp_adjusted": "#2ca02c"}
+MAIN_MODEL = "lstm_notemp"
 
 
 @st.cache_resource(show_spinner=False)
@@ -379,6 +379,8 @@ def load_bundle(slug):
     cfg = json.loads(path.read_text(encoding="utf-8"))
     models = {}
     for variant, info in cfg["variants"].items():
+        if variant != "notemp":                       # 含氣溫的 LSTM 已不使用，權重檔可以不上傳
+            continue
         wp = base / info["weights"]
         if not wp.exists():
             raise FileNotFoundError(f"找不到模型權重檔 {MODEL_DIR_NAME}/{info['weights']}")
@@ -406,16 +408,9 @@ def predict_site(series, temp_s, cfg, models, n_months=12, use_known=False):
 
     last = series.index[-1]
     future = [last + pd.DateOffset(months=i) for i in range(1, n_months + 1)]
-    clim = {int(k): v for k, v in cfg["climatology"].items()}                  # 訓練期各月份的平均氣溫
-    if use_known:
-        t_fut = [float(temp_s[m]) for m in future]
-    else:
-        t_fut = [clim[m.month] for m in future]
-    t_hist = align_temperature(series.iloc[-LOOKBACK_MONTHS:], temp_s)         # 視窗內各月的實際氣溫
+    align_temperature(series.iloc[-LOOKBACK_MONTHS:], temp_s)                   # 確認氣溫表涵蓋最近 12 個月
 
     out = {}
-    out["lstm_temp"] = forecast_recursive(models["temp"], vals, series.index, n_months, cfg["y_scaler"],
-                                          t_hist=t_hist, t_sc=cfg["t_scaler"], t_future=t_fut)
     out["lstm_notemp"] = forecast_recursive(models["notemp"], vals, series.index, n_months, cfg["y_scaler"])
     tm = cfg["temp_model"]
     _, adj = forecast_temp_adjusted(series, temp_s, n_months, tm["beta_all"],
@@ -519,9 +514,9 @@ def _show_forecast(series, months, lines, unit):
                                  hovertemplate=f"%{{y:,.0f}} {u}"))
     for k, v in lines.items():
         fig.add_trace(go.Scatter(x=x, y=list(v), mode="lines+markers", name=MODEL_LABELS_EN[k],
-                                 line=dict(color=MODEL_COLORS[k], width=3, dash="dash" if k == "lstm_temp" else "dot"),
+                                 line=dict(color=MODEL_COLORS[k], width=3, dash="dash" if k == MAIN_MODEL else "dot"),
                                  marker=dict(size=9), hovertemplate=f"%{{y:,.0f}} {u}"))
-    main = lines["lstm_temp"]
+    main = lines[MAIN_MODEL]
     k0 = int(pd.Series(main).astype(float).idxmax())
     fig.add_annotation(x=x[k0], y=float(main[k0]), text=f"Peak: {float(main[k0]):,.0f} {u}", showarrow=True,
                        arrowhead=2, ax=0, ay=-40, font=dict(color="crimson", size=13))
@@ -572,13 +567,12 @@ def render_monthly_tab():
 
     st.subheader("模型評估（在 Colab 以驗證期與測試期資料計算）")
     one = cfg["metrics"]["one_step"]
-    st.write(f"測試期（單步）MAPE：LSTM 含氣溫 **{one['lstm_temp']['test']['MAPE_%']:.2f}%**、"
-             f"LSTM 不含氣溫 **{one['lstm_notemp']['test']['MAPE_%']:.2f}%**、"
+    st.write(f"測試期（單步）MAPE：LSTM **{one['lstm_notemp']['test']['MAPE_%']:.2f}%**、"
              f"氣溫修正模型 **{one['temp_adjusted']['test']['MAPE_%']:.2f}%**")
     with st.expander("📋 點此展開／收合模型評估指標表 (Metrics)", expanded=False):
         st.dataframe(_metrics_table_bundle(cfg), use_container_width=True, hide_index=True)
     _show_predictions(_frame_from_bundle(cfg), unit)
-    st.caption("測試期只有約 11 個月，樣本不多；含氣溫與不含氣溫的差距很小時，不能說氣溫讓 LSTM 明顯變準。"
+    st.caption("測試期只有約 11 個月，樣本不多。LSTM 只使用過去的用電量；氣溫修正模型是簡單公式（去年同月用電量，依今年與去年的氣溫差修正）。"
                "評估時，未來氣溫用「訓練期的同月平均氣溫」，沒有偷看實際氣溫。")
 
     st.subheader("預測未來月份（未來 12 個月）")
