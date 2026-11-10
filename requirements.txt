@@ -6,6 +6,3 @@ plotly
 openpyxl
 statsmodels
 tensorflow
-scikit-learn==1.6.1
-joblib
-h5py
