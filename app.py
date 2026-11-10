@@ -801,6 +801,167 @@ def render_monthly_tab():
     _pipeline(*got)
 
 
+# =========================================================
+# 分頁三：Simulink 模擬負載預測（展示用）
+# 模型：lstm_pload_model.h5（輸入最近 50 筆 [Pload, Pbess, Ppv]，輸出未來 10 步 Pload）
+# 縮放器：pload_feature_scaler.pkl、pload_target_scaler.pkl
+# =========================================================
+SIM_MODEL_FILES = ("lstm_pload_model.h5", "pload_feature_scaler.pkl", "pload_target_scaler.pkl")
+SIM_LOOK_BACK, SIM_STEPS = 50, 10
+SIM_FEATURES = ["Pload", "Pbess", "Ppv"]
+
+
+@st.cache_resource(show_spinner=False)
+def _load_sim_assets():
+    import joblib
+    from tensorflow.keras.models import load_model
+    base = Path(__file__).resolve().parent
+    missing = [f for f in SIM_MODEL_FILES if not (base / f).exists()]
+    if missing:
+        raise FileNotFoundError(f"找不到檔案：{missing}")
+    model = load_model(str(base / SIM_MODEL_FILES[0]), compile=False)
+    return model, joblib.load(base / SIM_MODEL_FILES[1]), joblib.load(base / SIM_MODEL_FILES[2])
+
+
+def _read_sim_table(file):
+    """讀 .mat（#refs#/z：Pgrid, Pload, Pbess, Ppv, ...）或 .csv，回傳 DataFrame。"""
+    name = file.name.lower()
+    if name.endswith(".mat"):
+        import h5py
+        with h5py.File(file, "r") as f:
+            sig = np.array(f["#refs#/z"])
+        if sig.shape[0] < sig.shape[1]:
+            sig = sig.T
+        if sig.shape[1] < 4:
+            raise ValueError(f".mat 只有 {sig.shape[1]} 個訊號，至少需要 4 個（Pgrid, Pload, Pbess, Ppv）")
+        return pd.DataFrame(sig[:, :4], columns=["Pgrid", "Pload", "Pbess", "Ppv"])
+    return pd.read_csv(file, encoding="utf-8-sig")
+
+
+def _sim_guess(cols, keys, fallback):
+    for i, c in enumerate(cols):
+        if any(k in str(c).lower() for k in keys):
+            return i
+    return min(fallback, len(cols) - 1)
+
+
+def _sim_predict(model, fs, ts, window):
+    """window：形狀 (50, 3) 的真實數值 [Pload, Pbess, Ppv]；回傳未來 10 步 Pload（真實單位）。"""
+    x = fs.transform(window).reshape(1, SIM_LOOK_BACK, len(SIM_FEATURES)).astype(np.float32)
+    return ts.inverse_transform(np.asarray(model.predict(x, verbose=0)))[0]
+
+
+def _sim_backtest(model, fs, ts, feat, stride):
+    L, S = SIM_LOOK_BACK, SIM_STEPS
+    idx = np.arange(L, len(feat) - S, stride)
+    X = np.stack([feat[i - L:i] for i in idx])
+    Xs = fs.transform(X.reshape(-1, X.shape[2])).reshape(len(idx), L, X.shape[2]).astype(np.float32)
+    pred = ts.inverse_transform(np.asarray(model.predict(Xs, verbose=0)))
+    true = np.stack([feat[i:i + S, 0] for i in idx])
+    base1 = np.repeat(feat[idx - 1, 0][:, None], S, axis=1)               # 重複最後一筆 Pload
+    base2 = np.repeat(X[:, :, 0].mean(axis=1)[:, None], S, axis=1)       # 最近 50 筆平均
+    scale = np.abs(true).mean()
+    rows = {}
+    for name, p in [("LSTM", pred), ("基準1：重複最後一筆 Pload", base1), ("基準2：最近 50 筆平均", base2)]:
+        e = p - true
+        rows[name] = {"MAE (kW)": np.abs(e).mean(), "RMSE (kW)": np.sqrt((e ** 2).mean()),
+                      "MAE 佔 |Pload| 平均 (%)": np.abs(e).mean() / scale * 100 if scale > 0 else np.nan}
+    return pd.DataFrame(rows).T, len(idx)
+
+
+def _sim_plot(hist, actual, pred):
+    fig, ax = plt.subplots(figsize=(11, 4.2))
+    x_hist = np.arange(-len(hist) + 1, 1)
+    x_fut = np.arange(1, len(actual) + 1)
+    ax.plot(x_hist, hist, color="gray", label="Input history (last 50)")
+    ax.plot(x_fut, actual, "k-o", label="Actual Pload")
+    ax.plot(x_fut, pred, "r--o", label="LSTM forecast")
+    ax.axvline(0.5, color="gray", linestyle=":")
+    ax.set_xlabel("Step (0 = last input sample)"); ax.set_ylabel("Pload (kW)")
+    ax.set_title("Simulink Pload: next 10 steps"); ax.grid(True, alpha=0.3); ax.legend()
+    fig.tight_layout()
+    return fig
+
+
+def render_simulink_tab():
+    st.header("🔬 Simulink 微電網模擬：負載預測（展示）")
+    st.warning("⚠️ 這個模型是用 Simulink 微秒級模擬訊號訓練的（輸入：最近 50 筆 Pload、Pbess、Ppv；"
+               "輸出：未來 10 步 Pload），與校園用電無關，僅供展示。")
+
+    try:
+        model, fs, ts = _load_sim_assets()
+    except Exception as e:
+        st.error(f"❌ 無法載入模型：{e}")
+        st.info("請確認 GitHub 倉庫有 lstm_pload_model.h5、pload_feature_scaler.pkl、pload_target_scaler.pkl，"
+                "且 requirements.txt 含 tensorflow、scikit-learn、joblib。")
+        return
+
+    file = st.file_uploader("上傳模擬資料（.mat 或 .csv）", type=["mat", "csv"], key="sim_upload")
+    if file is None:
+        st.info("💡 請上傳 Scope_power2.mat（或 CSV：需有 Pload、Pbess、Ppv 三欄）。")
+        return
+    try:
+        df = _read_sim_table(file)
+    except Exception as e:
+        st.error(f"❌ 讀取檔案失敗：{e}")
+        return
+
+    cols = [str(c) for c in df.columns]
+    df.columns = cols
+    c1, c2, c3 = st.columns(3)
+    var_style = all(c.lower().startswith("var") for c in cols)           # matlab_savett2.csv：Var3, Var4, Var5
+    c_load = c1.selectbox("Pload 欄位", cols, index=_sim_guess(cols, ["pload"], 2 if var_style else 1))
+    c_bess = c2.selectbox("Pbess 欄位", cols, index=_sim_guess(cols, ["pbess"], 3 if var_style else 2))
+    c_pv = c3.selectbox("Ppv 欄位", cols, index=_sim_guess(cols, ["ppv"], 4 if var_style else 3))
+
+    feat = df[[c_load, c_bess, c_pv]].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    if not np.isfinite(feat).all():
+        st.error("❌ 資料含有 NaN 或非數值，請檢查欄位選擇。")
+        return
+    if len(feat) < SIM_LOOK_BACK + SIM_STEPS + 1:
+        st.error(f"❌ 資料至少需要 {SIM_LOOK_BACK + SIM_STEPS + 1} 筆，目前 {len(feat)} 筆。")
+        return
+
+    lo, hi = np.asarray(fs.data_min_), np.asarray(fs.data_max_)
+    pad = 0.05 * (hi - lo)
+    bad = [n for i, n in enumerate(SIM_FEATURES) if feat[:, i].min() < lo[i] - pad[i] or feat[:, i].max() > hi[i] + pad[i]]
+    if bad:
+        st.warning(f"⚠️ {', '.join(bad)} 超出模型訓練時的數值範圍，預測可能不可靠。")
+    st.success(f"✅ 讀入 {len(feat)} 筆資料")
+
+    # ---------- 單次預測 ----------
+    st.subheader("單次預測")
+    default_i = min(3000, len(feat) - SIM_STEPS)
+    i = st.slider("預測起點（使用此位置之前的 50 筆）", SIM_LOOK_BACK, len(feat) - SIM_STEPS,
+                  max(SIM_LOOK_BACK, default_i))
+    if st.button("執行預測", type="primary", key="sim_predict"):
+        pred = _sim_predict(model, fs, ts, feat[i - SIM_LOOK_BACK:i])
+        actual = feat[i:i + SIM_STEPS, 0]
+        st.dataframe(pd.DataFrame({"第幾步": np.arange(1, SIM_STEPS + 1), "實際 Pload (kW)": np.round(actual, 3),
+                                   "預測 Pload (kW)": np.round(pred, 3),
+                                   "誤差 (kW)": np.round(pred - actual, 3)}),
+                     use_container_width=True, hide_index=True)
+        st.pyplot(_sim_plot(feat[i - SIM_LOOK_BACK:i, 0], actual, pred))
+
+    # ---------- 回測 ----------
+    st.subheader("回測：LSTM 與簡單基準的比較")
+    stride = int(st.number_input("抽樣間隔（越大越快）", 1, 200, 20, key="sim_stride"))
+    if st.button("執行回測", key="sim_backtest"):
+        with st.spinner("回測中…"):
+            tab, n_win = _sim_backtest(model, fs, ts, feat, stride)
+        st.write(f"共評估 {n_win} 個視窗")
+        st.dataframe(tab.round(4), use_container_width=True)
+        lstm = tab.loc["LSTM", "MAE (kW)"]
+        best = tab.drop(index="LSTM")["MAE (kW)"]
+        if lstm < 0.95 * best.min():
+            st.success(f"✅ LSTM 的 MAE 比最強基準（{best.idxmin()}）小 {(1 - lstm / best.min()) * 100:.1f}% 以上。")
+        elif lstm <= 1.05 * best.min():
+            st.info("🟡 LSTM 與最強基準相當，沒有明顯優勢。")
+        else:
+            st.error(f"❌ LSTM 的 MAE 是最強基準（{best.idxmin()}）的 {lstm / best.min():.1f} 倍，沒有勝過簡單方法。")
+        st.caption("模擬資料的負載在短時間內幾乎不變，簡單基準本來就很準，這個結果不代表 LSTM 在真實用電預測上的表現。")
+
+
 st.set_page_config(page_title="微電網 AI 預測與分析系統", layout="wide")
 
 # 💡 引入 Google Fonts (Noto Sans TC 思源黑體) 並套用到全站
@@ -817,9 +978,10 @@ html, body, [class*="css"] {
 st.title("⚡ 微電網 EMS 智慧用電分析與 AI 預測平台")
 st.markdown("結合**校園長短期用電統計分析**與 **月度用電量 AI 預測**。")
 
-tab1, tab2 = st.tabs([
+tab1, tab2, tab3 = st.tabs([
     "📈 1. 歷史用電統計與動態趨勢分析", 
-    "🚀 2. 月度用電量 AI 預測系統"
+    "🚀 2. 月度用電量 AI 預測系統",
+    "🔬 3. Simulink 模擬負載預測（展示）"
 ])
 
 with tab1:
@@ -897,3 +1059,6 @@ with tab1:
 with tab2:
     st.header("🚀 月度用電量 AI 預測系統")
     render_monthly_tab()
+
+with tab3:
+    render_simulink_tab()
