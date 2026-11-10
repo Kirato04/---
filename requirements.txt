@@ -4,8 +4,8 @@ numpy
 matplotlib
 plotly
 openpyxl
+statsmodels
 tensorflow
-scikit-learn
+scikit-learn==1.6.1
 joblib
-pytz
-python-dateutil
+h5py
