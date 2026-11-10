@@ -4,5 +4,4 @@ numpy
 matplotlib
 plotly
 openpyxl
-statsmodels
 tensorflow

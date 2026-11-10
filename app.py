@@ -116,23 +116,95 @@ def evaluate(y_true, y_pred):
 
 
 # ---------------------------------------------------------
-# 4. 模型：季節性基準、Holt-Winters、小型 LSTM
+# 4. 模型：小型 LSTM 與氣溫修正模型
 # ---------------------------------------------------------
-def seasonal_naive_predict(values, positions):
-    return np.array([values[t - 12] for t in positions])
+MODEL_LABELS = {"lstm": "LSTM", "temp_adjusted": "氣溫修正模型"}
+MODEL_LABELS_EN = {"lstm": "LSTM", "temp_adjusted": "Temperature-adjusted"}
 
 
-def holt_winters_predict(values, positions):
-    from statsmodels.tsa.holtwinters import ExponentialSmoothing
+def load_temperature_file(file):
+    """支援兩種格式：(1) 年份,月份,平均氣溫  (2) CODiS 月報表（列＝年份，欄＝1~12 月，最後一欄年平均）。"""
+    try:
+        df = pd.read_csv(file, encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        file.seek(0)
+        df = pd.read_csv(file, encoding="cp950")
+    cols = [str(c).strip() for c in df.columns]
+    df.columns = cols
+    if "年份" in cols and "月份" in cols:
+        tcol = next((c for c in cols if "氣溫" in c), None)
+        if tcol is None:
+            raise ValueError("找不到「氣溫」欄位")
+        y = pd.to_numeric(df["年份"], errors="coerce")
+        m = pd.to_numeric(df["月份"], errors="coerce")
+        v = pd.to_numeric(df[tcol], errors="coerce")
+    else:
+        month_cols = [str(i) for i in range(1, 13)]
+        if not all(c in cols for c in month_cols):
+            raise ValueError("格式無法辨認：需要「年份,月份,平均氣溫」三欄，或 CODiS 月報表（欄位為 1～12 月）")
+        rows = []
+        for _, r in df.iterrows():
+            yy = pd.to_numeric(r[cols[0]], errors="coerce")
+            for mm in range(1, 13):
+                rows.append((yy, mm, pd.to_numeric(r[str(mm)], errors="coerce")))
+        t = pd.DataFrame(rows, columns=["y", "m", "v"])
+        y, m, v = t["y"], t["m"], t["v"]
+    d = pd.DataFrame({"y": y, "m": m, "v": v}).dropna()
+    d = d[(d["m"] >= 1) & (d["m"] <= 12)]
+    if d.empty:
+        raise ValueError("氣溫檔沒有可用的資料")
+    idx = pd.to_datetime({"year": d["y"].astype(int), "month": d["m"].astype(int), "day": 1})
+    s = pd.Series(d["v"].to_numpy(dtype=float), index=idx).sort_index()
+    s = s[~s.index.duplicated(keep="last")]
+    if ((s < -10) | (s > 45)).any():
+        raise ValueError("氣溫數值超出合理範圍 (-10～45 °C)，請確認單位")
+    return s
 
-    out = []
-    for t in positions:
-        fit = ExponentialSmoothing(
-            values[:t], trend="add", seasonal="add",
-            seasonal_periods=12, initialization_method="estimated",
-        ).fit()
-        out.append(float(fit.forecast(1)[0]))
-    return np.array(out)
+
+def align_temperature(series, temp):
+    """取出與用電資料同月份的氣溫；缺任何一個月就報錯。"""
+    missing = [d for d in series.index if d not in temp.index or not np.isfinite(temp[d])]
+    if missing:
+        names = [d.strftime("%Y-%m") for d in missing[:6]]
+        raise ValueError(f"氣溫檔缺少這些月份：{names}{'…' if len(missing) > 6 else ''}（共 {len(missing)} 個）")
+    return temp.reindex(series.index).to_numpy(dtype=float)
+
+
+def fit_temp_beta(values, temps, upto):
+    """用電的年增率 ≈ beta x 氣溫差（今年同月氣溫 - 去年同月氣溫），只用前 upto 筆估計。"""
+    xs, ys = [], []
+    for t in range(12, upto):
+        xs.append(temps[t] - temps[t - 12])
+        ys.append(values[t] / values[t - 12] - 1)
+    xs, ys = np.array(xs), np.array(ys)
+    den = float((xs ** 2).sum())
+    return float((xs * ys).sum() / den) if den > 1e-9 else 0.0
+
+
+def temp_climatology(temps, index, upto):
+    """前 upto 筆資料中，每個月份的平均氣溫（未來氣溫未知時的預期氣溫）。"""
+    s = pd.Series(np.asarray(temps[:upto], dtype=float), index=index[:upto])
+    return {int(k): float(v) for k, v in s.groupby(s.index.month).mean().items()}
+
+
+def temp_adjusted_predict(values, temps, index, positions, beta, clim):
+    """預測 = 去年同月用電 x (1 + beta x (預期氣溫 - 去年同月氣溫))。"""
+    return np.array([values[t - 12] * (1 + beta * (clim[index[t].month] - temps[t - 12]))
+                     for t in positions])
+
+
+def forecast_temp_adjusted(series, temp, n_months, beta, clim, known_future=None):
+    """未來 n_months 個月的氣溫修正預測。known_future 有值時，優先使用其中的實際氣溫。"""
+    last = series.index[-1]
+    months = [last + pd.DateOffset(months=i) for i in range(1, n_months + 1)]
+    vals = []
+    for m in months:
+        prev = m - pd.DateOffset(years=1)
+        t_exp = clim[m.month]
+        if known_future is not None and m in known_future.index and np.isfinite(known_future[m]):
+            t_exp = float(known_future[m])
+        vals.append(float(series[prev] * (1 + beta * (t_exp - temp[prev]))))
+    return months, vals
 
 
 def build_lstm(lookback=LOOKBACK_MONTHS, n_features=3, units=16, dropout=0.2):
@@ -165,9 +237,8 @@ def train_lstm(X_tr, y_tr, X_va, y_va, epochs=500, seed=42):
 # ---------------------------------------------------------
 # 5. 完整實驗流程
 # ---------------------------------------------------------
-def run_experiment(series, out_dir=".", target_name="度數", unit="kWh",
-                   use_holt_winters=True, use_lstm=True, epochs=300, seed=42,
-                   save=True):
+def run_experiment(series, out_dir=".", target_name="度數", unit="kWh", temp=None,
+                   use_lstm=True, epochs=300, seed=42, save=True):
     n = len(series)
     train, val, test = split_5_1_1(series)
     n_train, n_val = len(train), len(val)
@@ -177,18 +248,17 @@ def run_experiment(series, out_dir=".", target_name="度數", unit="kWh",
     scaled = _scale(values, sc)
     ranges = {"val": (n_train, n_train + n_val), "test": (n_train + n_val, n)}
 
-    preds = {"seasonal_naive": {}}
-    for name, (a, b) in ranges.items():
-        preds["seasonal_naive"][name] = seasonal_naive_predict(values, range(a, b))
-
-    if use_holt_winters:
-        try:
-            preds["holt_winters"] = {
-                name: holt_winters_predict(values, range(a, b))
-                for name, (a, b) in ranges.items()
-            }
-        except Exception as e:
-            print(f"[略過 Holt-Winters] {e}")
+    preds = {}
+    temp_info = None
+    if temp is not None:                       # 氣溫修正模型：只用訓練段估計 beta 與預期氣溫
+        temps = align_temperature(series, temp)
+        beta = fit_temp_beta(values, temps, n_train)
+        clim = temp_climatology(temps, index, n_train)
+        preds["temp_adjusted"] = {
+            name: temp_adjusted_predict(values, temps, index, range(a, b), beta, clim)
+            for name, (a, b) in ranges.items()
+        }
+        temp_info = {"beta": beta, "climatology": clim}
 
     model = None
     if use_lstm:
@@ -203,6 +273,8 @@ def run_experiment(series, out_dir=".", target_name="度數", unit="kWh",
                 preds["lstm"][name] = _unscale(p, sc)
         except ImportError as e:
             print(f"[略過 LSTM] 沒有安裝 tensorflow：{e}")
+    if not preds:
+        raise ValueError("沒有可用的模型：LSTM 無法執行，也沒有提供氣溫檔")
 
     metrics = {
         m: {name: evaluate(values[slice(*ranges[name])], p[name]) for name in ranges}
@@ -224,6 +296,7 @@ def run_experiment(series, out_dir=".", target_name="度數", unit="kWh",
         "split_months": {"train": n_train, "val": n_val, "test": n - n_train - n_val},
         "best_model_on_val": best,
         "metrics": metrics,
+        "temp_model": temp_info,
     }
     if save:
         out = Path(out_dir)
@@ -492,7 +565,7 @@ def _metrics_table(metrics):
     rows = []
     for model, by_split in metrics.items():
         for split, m in by_split.items():
-            rows.append({"模型": model, "資料集": split, "MAPE (%)": round(m["MAPE_%"], 2),
+            rows.append({"模型": MODEL_LABELS.get(model, model), "資料集": split, "MAPE (%)": round(m["MAPE_%"], 2),
                          "RMSE": round(m["RMSE"], 2), "MAE": round(m["MAE"], 2)})
     return pd.DataFrame(rows)
 
@@ -500,9 +573,9 @@ def _metrics_table(metrics):
 def _plot_predictions_mpl(frame, unit):
     fig, ax = plt.subplots(figsize=(11, 4.5))
     ax.plot(frame.index, frame["actual"], color="dodgerblue", linewidth=2.5, marker="o", label="Actual")
-    colors = {"seasonal_naive": "tab:orange", "holt_winters": "tab:green", "lstm": "tab:red"}
+    colors = {"temp_adjusted": "tab:green", "lstm": "tab:red"}
     for m in [c for c in frame.columns if c in colors]:
-        ax.plot(frame.index, frame[m], color=colors[m], marker="x", linestyle="--", label=m)
+        ax.plot(frame.index, frame[m], color=colors[m], marker="x", linestyle="--", label=MODEL_LABELS_EN[m])
     test_start = frame.index[frame["split"] == "test"][0]
     ax.axvline(test_start, color="gray", linestyle=":", label="Test start")
     ax.set_title("Monthly Forecast Result (Validation & Test)")
@@ -528,7 +601,7 @@ def _style_prediction_fig(fig, title, unit, x_title="Month"):
 
 
 def _show_predictions(frame, unit):
-    """驗證集＋測試集：真實值與三個模型的預測對照。優先 Plotly，沒安裝時退回 Matplotlib。"""
+    """驗證集＋測試集：真實值與模型預測的對照。優先 Plotly，沒安裝時退回 Matplotlib。"""
     try:
         import plotly.graph_objects as go
     except ImportError:
@@ -541,10 +614,10 @@ def _show_predictions(frame, unit):
         x=frame.index, y=frame["actual"], mode="lines+markers", name="Actual",
         line=dict(color="dodgerblue", width=3.5), marker=dict(size=10),
         hovertemplate=f"%{{y:,.0f}} {u}"))
-    styles = {"seasonal_naive": "#ff7f0e", "holt_winters": "#2ca02c", "lstm": "#d62728"}
+    styles = {"temp_adjusted": "#2ca02c", "lstm": "#d62728"}
     for m in [c for c in frame.columns if c in styles]:
         fig.add_trace(go.Scatter(
-            x=frame.index, y=frame[m], mode="lines+markers", name=m,
+            x=frame.index, y=frame[m], mode="lines+markers", name=MODEL_LABELS_EN[m],
             line=dict(color=styles[m], width=2.5, dash="dash"),
             marker=dict(size=8, symbol="x"), hovertemplate=f"%{{y:,.0f}} {u}"))
 
@@ -560,7 +633,7 @@ def _show_predictions(frame, unit):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _show_forecast(series, months, values, label, unit):
+def _show_forecast(series, months, values, label, unit, extra=None):
     """未來月份預測：去年同月真實值與預測值。優先 Plotly，沒安裝時退回 Matplotlib。"""
     try:
         import plotly.graph_objects as go
@@ -587,6 +660,12 @@ def _show_forecast(series, months, values, label, unit):
         x=x, y=list(values), mode="lines+markers", name=label,
         line=dict(color="#d62728", width=3, dash="dash"), marker=dict(size=9),
         hovertemplate=f"%{{y:,.0f}} {u}"))
+
+    for nm, vals2 in (extra or {}).items():
+        fig.add_trace(go.Scatter(
+            x=x, y=list(vals2), mode="lines+markers", name=MODEL_LABELS_EN.get(nm, nm),
+            line=dict(color="#2ca02c", width=3, dash="dashdot"), marker=dict(size=9, symbol="diamond"),
+            hovertemplate=f"%{{y:,.0f}} {u}"))
 
     k = int(pd.Series(values).astype(float).idxmax())
     fig.add_annotation(x=x[k], y=float(values[k]), text=f"Peak: {float(values[k]):,.0f} {u}",
@@ -639,7 +718,7 @@ def _plot_monthly_trend(df_target, year, location):
     st.pyplot(fig)
 
 
-def _plot_forecast_mpl(series, months, values, label, unit):
+def _plot_forecast_mpl(series, months, values, label, unit, extra=None):
     fig, ax = plt.subplots(figsize=(11, 4.5))
     x = pd.to_datetime([m + "-01" for m in months])
     
@@ -655,6 +734,8 @@ def _plot_forecast_mpl(series, months, values, label, unit):
         ax.plot(prev_x, prev_vals, color="dodgerblue", linewidth=2.5, marker="s", linestyle="-", label="Actual (Last Year)")
 
     ax.plot(x, values, color="tab:red", marker="o", linestyle="--", label=label)
+    for nm, vals2 in (extra or {}).items():
+        ax.plot(x, list(vals2), color="tab:green", marker="D", linestyle="-.", label=MODEL_LABELS_EN.get(nm, nm))
     ax.set_title("Monthly Forecast Result")
     ax.set_xlabel("Month")
     ax.set_ylabel(f"Monthly value ({_en_unit(unit)})")
@@ -728,45 +809,68 @@ def _pipeline(series, label, unit, key):
     )
 
     st.subheader("訓練與評估")
-    try:
-        import statsmodels  # noqa: F401
-        has_hw = True
-    except ImportError:
-        has_hw = False
-    use_hw = st.checkbox("加入 Holt-Winters 比較", value=has_hw, disabled=not has_hw)
-    if not has_hw:
-        st.caption("未安裝 statsmodels，已略過 Holt-Winters。")
-    
+    temp_file = st.file_uploader("（選用）上傳月平均氣溫檔，加入「氣溫修正模型」", type=["csv"], key="monthly_temp_file")
+    temp_s, use_known = None, False
+    if temp_file is not None:
+        try:
+            temp_s = load_temperature_file(temp_file)
+            align_temperature(series, temp_s)           # 檢查是否涵蓋所有用電月份
+            st.success(f"✅ 氣溫檔讀入 {len(temp_s)} 個月（{temp_s.index[0]:%Y-%m} ～ {temp_s.index[-1]:%Y-%m}）")
+        except Exception as e:
+            st.error(f"❌ 氣溫檔無法使用：{e}")
+            temp_s = None
+    else:
+        st.caption("沒有上傳氣溫檔時，只訓練 LSTM。氣溫檔格式：年份,月份,平均氣溫（西元年）。")
+    if temp_s is not None:
+        fut = [series.index[-1] + pd.DateOffset(months=i) for i in range(1, 13)]
+        if all((m in temp_s.index) and np.isfinite(temp_s[m]) for m in fut):
+            use_known = st.checkbox("預測未來月份時，使用氣溫檔中的實際氣溫（預設用歷史同月平均氣溫）", value=False)
+    full_key = tuple(key) + (temp_file.name if temp_s is not None else None, bool(use_known))
+
     epochs = 300  # 固定最佳預設輪數，無須使用者手動調整
 
     if st.button("開始訓練並評估", type="primary"):
         with st.spinner("訓練與預測中（Z-score 標準化），請稍候…"):
             try:
                 res = run_experiment(series, out_dir=str(ASSET_DIR), target_name=label,
-                                        unit=unit, use_holt_winters=use_hw, epochs=epochs)
+                                     unit=unit, temp=temp_s, epochs=epochs)
                 
                 # 同時自動執行未來 12 個月預測
                 predictor = MonthlyEMSPredictor()
                 out = predictor.forecast_monthly(series.to_numpy(), series.index[-1], 12)
                 
+                temp_fc, beta_all = None, None
+                if temp_s is not None:                       # 氣溫修正模型的未來預測（用全部資料估計 beta）
+                    tt = align_temperature(series, temp_s)
+                    beta_all = fit_temp_beta(series.to_numpy(dtype=float), tt, len(series))
+                    clim_all = temp_climatology(tt, series.index, len(series))
+                    _, vals_t = forecast_temp_adjusted(series, temp_s, 12, beta_all, clim_all,
+                                                       temp_s if use_known else None)
+                    temp_fc = {"temp_adjusted": [round(v, 2) for v in vals_t]}
+
                 st.session_state["monthly_result"] = {
-                    "res": res, 
-                    "forecast_out": out, 
+                    "res": res,
+                    "forecast_out": out,
+                    "temp_forecast": temp_fc,
+                    "beta": beta_all,
                     "audit_report": predictor.get_system_audit_report(),
-                    "key": key
+                    "key": full_key
                 }
             except Exception as e:
                 st.error(f"訓練或預測失敗：{e}")
 
     saved = st.session_state.get("monthly_result")
-    if not (saved and saved["key"] == key):
+    if not (saved and saved["key"] == full_key):
         return
     res = saved["res"]
-    st.write(f"驗證集表現最佳的模型：**{res['best_model']}**")
+    st.write(f"驗證集表現最佳的模型：**{MODEL_LABELS.get(res['best_model'], res['best_model'])}**")
     with st.expander("📋 點此展開／收合模型評估指標表 (Metrics)", expanded=False):
         st.dataframe(_metrics_table(res["metrics"]), use_container_width=True, hide_index=True)
     _show_predictions(res["predictions"], unit)
-    st.caption("LSTM 的驗證集同時用於提早停止，所以驗證集成績略偏樂觀；測試集才是最終成績。")
+    st.caption("LSTM 的驗證集同時用於提早停止，所以驗證集成績略偏樂觀；測試集才是最終成績。"
+               "氣溫修正模型評估時，未來氣溫用「訓練期的同月平均氣溫」，沒有偷看實際氣溫。")
+    if saved.get("beta") is not None:
+        st.caption(f"氣溫修正模型：同一個月份，氣溫每比去年高 1 °C，用電量約增加 {saved['beta'] * 100:.2f}%（以全部資料估計）。")
 
     st.subheader("預測未來月份（未來 12 個月）")
     out = saved.get("forecast_out")
@@ -782,9 +886,12 @@ def _pipeline(series, label, unit, key):
             st.error("也無法產生備援值。")
         else:
             tbl = pd.DataFrame({"月份": out["prediction_months"], f"預測值 ({unit})": vals})
+            extra = saved.get("temp_forecast")
+            if extra:
+                tbl[f"氣溫修正預測值 ({unit})"] = extra["temp_adjusted"]
             with st.expander("📋 點此展開／收合預測數據表格", expanded=False):
                 st.dataframe(tbl, use_container_width=True, hide_index=True)
-            _show_forecast(series, out["prediction_months"], vals, line_label, unit)
+            _show_forecast(series, out["prediction_months"], vals, line_label, unit, extra=extra)
             st.download_button("下載預測結果 CSV", tbl.to_csv(index=False).encode("utf-8-sig"),
                                "monthly_forecast.csv", "text/csv")
         
