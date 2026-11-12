@@ -81,66 +81,10 @@ def _month_feats(index):
     return np.column_stack([np.sin(ang), np.cos(ang)])
 
 
-def load_temperature_file(file):
-    """支援兩種格式：(1) 年份,月份,平均氣溫  (2) CODiS 月報表（列＝年份，欄＝1~12 月，最後一欄年平均）。"""
-    try:
-        df = pd.read_csv(file, encoding="utf-8-sig")
-    except UnicodeDecodeError:
-        file.seek(0)
-        df = pd.read_csv(file, encoding="cp950")
-    cols = [str(c).strip() for c in df.columns]
-    df.columns = cols
-    if "年份" in cols and "月份" in cols:
-        tcol = next((c for c in cols if "氣溫" in c), None)
-        if tcol is None:
-            raise ValueError("找不到「氣溫」欄位")
-        y = pd.to_numeric(df["年份"], errors="coerce")
-        m = pd.to_numeric(df["月份"], errors="coerce")
-        v = pd.to_numeric(df[tcol], errors="coerce")
-    else:
-        month_cols = [str(i) for i in range(1, 13)]
-        if not all(c in cols for c in month_cols):
-            raise ValueError("格式無法辨認：需要「年份,月份,平均氣溫」三欄，或 CODiS 月報表（欄位為 1～12 月）")
-        rows = []
-        for _, r in df.iterrows():
-            yy = pd.to_numeric(r[cols[0]], errors="coerce")
-            for mm in range(1, 13):
-                rows.append((yy, mm, pd.to_numeric(r[str(mm)], errors="coerce")))
-        t = pd.DataFrame(rows, columns=["y", "m", "v"])
-        y, m, v = t["y"], t["m"], t["v"]
-    d = pd.DataFrame({"y": y, "m": m, "v": v}).dropna()
-    d = d[(d["m"] >= 1) & (d["m"] <= 12)]
-    if d.empty:
-        raise ValueError("氣溫檔沒有可用的資料")
-    idx = pd.to_datetime({"year": d["y"].astype(int), "month": d["m"].astype(int), "day": 1})
-    s = pd.Series(d["v"].to_numpy(dtype=float), index=idx).sort_index()
-    s = s[~s.index.duplicated(keep="last")]
-    if ((s < -10) | (s > 45)).any():
-        raise ValueError("氣溫數值超出合理範圍 (-10～45 °C)，請確認單位")
-    return s
 
 
-def align_temperature(series, temp):
-    """取出與用電資料同月份的氣溫；缺任何一個月就報錯。"""
-    missing = [d for d in series.index if d not in temp.index or not np.isfinite(temp[d])]
-    if missing:
-        names = [d.strftime("%Y-%m") for d in missing[:6]]
-        raise ValueError(f"氣溫檔缺少這些月份：{names}{'…' if len(missing) > 6 else ''}（共 {len(missing)} 個）")
-    return temp.reindex(series.index).to_numpy(dtype=float)
 
 
-def forecast_temp_adjusted(series, temp, n_months, beta, clim, known_future=None):
-    """未來 n_months 個月的氣溫修正預測。known_future 有值時，優先使用其中的實際氣溫。"""
-    last = series.index[-1]
-    months = [last + pd.DateOffset(months=i) for i in range(1, n_months + 1)]
-    vals = []
-    for m in months:
-        prev = m - pd.DateOffset(years=1)
-        t_exp = clim[m.month]
-        if known_future is not None and m in known_future.index and np.isfinite(known_future[m]):
-            t_exp = float(known_future[m])
-        vals.append(float(series[prev] * (1 + beta * (t_exp - temp[prev]))))
-    return months, vals
 
 
 def _en_unit(u):
@@ -290,40 +234,53 @@ def _sigmoid(x):
 
 
 class NumpyLSTM:
-    """等價於 Keras 的 LSTM(units) -> Dropout -> Dense(1)（Dropout 在推論時不作用）。
-    權重排列與 Keras 相同：kernel (輸入數, 4*units)、recurrent (units, 4*units)，四個閘門依序為 i, f, c, o。"""
+    """等價於 Keras 的「LSTM 堆疊 → Dropout → Dense」（Dropout 在推論時不作用）。
+    layers：[(kernel, recurrent, bias), ...]，每個元素是一層 LSTM；除了最後一層，每層都輸出整段序列給下一層。
+    權重排列與 Keras 相同：kernel (輸入數, 4*單元數)、recurrent (單元數, 4*單元數)，四個閘門依序為 i, f, c, o。"""
 
-    def __init__(self, kernel, recurrent, bias, dense_w, dense_b):
-        self.kernel = np.asarray(kernel, dtype=np.float64)
-        self.recurrent = np.asarray(recurrent, dtype=np.float64)
-        self.bias = np.asarray(bias, dtype=np.float64)
+    def __init__(self, layers, dense_w, dense_b):
+        self.layers = [(np.asarray(k, dtype=np.float64), np.asarray(r, dtype=np.float64), np.asarray(b, dtype=np.float64))
+                       for k, r, b in layers]
         self.dense_w = np.asarray(dense_w, dtype=np.float64)
         self.dense_b = np.asarray(dense_b, dtype=np.float64)
 
     @classmethod
     def from_npz(cls, path):
         z = np.load(path)
-        return cls(z["kernel"], z["recurrent"], z["bias"], z["dense_w"], z["dense_b"])
+        if "kernel" in z.files:                                   # 舊格式：單層 LSTM
+            layers = [(z["kernel"], z["recurrent"], z["bias"])]
+        else:                                                     # 新格式：kernel_0, kernel_1, ...
+            n = sum(1 for k in z.files if k.startswith("kernel_"))
+            layers = [(z[f"kernel_{i}"], z[f"recurrent_{i}"], z[f"bias_{i}"]) for i in range(n)]
+        return cls(layers, z["dense_w"], z["dense_b"])
 
     @property
     def n_features(self):
-        return self.kernel.shape[0]
+        return self.layers[0][0].shape[0]
+
+    @property
+    def units(self):
+        return [r.shape[0] for _, r, _ in self.layers]
 
     def predict(self, X, verbose=0):
-        X = np.asarray(X, dtype=np.float64)
-        B, T, _ = X.shape
-        H = self.recurrent.shape[0]
-        h = np.zeros((B, H))
-        c = np.zeros((B, H))
-        for t in range(T):
-            z = X[:, t, :] @ self.kernel + h @ self.recurrent + self.bias
-            i = _sigmoid(z[:, :H])
-            f = _sigmoid(z[:, H:2 * H])
-            g = np.tanh(z[:, 2 * H:3 * H])
-            o = _sigmoid(z[:, 3 * H:])
-            c = f * c + i * g
-            h = o * np.tanh(c)
-        return h @ self.dense_w + self.dense_b
+        seq = np.asarray(X, dtype=np.float64)
+        for kernel, recurrent, bias in self.layers:
+            B, T, _ = seq.shape
+            H = recurrent.shape[0]
+            h = np.zeros((B, H))
+            c = np.zeros((B, H))
+            outs = []
+            for t in range(T):
+                z = seq[:, t, :] @ kernel + h @ recurrent + bias
+                i = _sigmoid(z[:, :H])
+                f = _sigmoid(z[:, H:2 * H])
+                g = np.tanh(z[:, 2 * H:3 * H])
+                o = _sigmoid(z[:, 3 * H:])
+                c = f * c + i * g
+                h = o * np.tanh(c)
+                outs.append(h)
+            seq = np.stack(outs, axis=1)                          # (B, T, H)：下一層的輸入
+        return seq[:, -1, :] @ self.dense_w + self.dense_b
 
 
 def forecast_recursive(model, y_hist, idx_hist, n_months, y_sc, t_hist=None, t_sc=None, t_future=None, strict=True):
@@ -361,11 +318,54 @@ def forecast_recursive(model, y_hist, idx_hist, n_months, y_sc, t_hist=None, t_s
 
 
 # ---------------------------------------------------------
+# brain_v2 架構的月度版：輸入過去 12 個月、一次輸出未來 12 個月（對應原本「輸入 96 步、一次輸出 96 步」）
+# ---------------------------------------------------------
+BRAIN_LOOKBACK, BRAIN_HORIZON = 12, 12
+
+
+def _mm_fit(values):
+    """MinMax 縮放（和原本 train.py 的 MinMaxScaler(0,1) 相同），範圍只用訓練段計算。"""
+    lo, hi = float(np.min(values)), float(np.max(values))
+    if hi - lo < 1e-9:
+        hi = lo + 1.0
+    return {"type": "minmax", "min": lo, "max": hi}
+
+
+def _mm_scale(x, sc):
+    return (np.asarray(x, dtype=float) - sc["min"]) / (sc["max"] - sc["min"])
+
+
+def _mm_unscale(x, sc):
+    return np.asarray(x, dtype=float) * (sc["max"] - sc["min"]) + sc["min"]
+
+
+def make_direct_samples(y_s, start, end, L=BRAIN_LOOKBACK, H=BRAIN_HORIZON):
+    """滑動視窗：輸入 y_s[i:i+L]（形狀 L x 1），輸出 y_s[i+L:i+L+H]；只使用 [start, end) 內的資料。"""
+    X, Y = [], []
+    for i in range(start, end - L - H + 1):
+        X.append(np.asarray(y_s[i:i + L], dtype=np.float32).reshape(L, 1))
+        Y.append(np.asarray(y_s[i + L:i + L + H], dtype=np.float32))
+    return np.array(X, dtype=np.float32), np.array(Y, dtype=np.float32)
+
+
+def forecast_direct(model, y_hist, sc, n_months, L=BRAIN_LOOKBACK, strict=True):
+    """一次預測：用最近 L 個月的真實用電，直接得到未來 H 個月，取前 n_months 個。"""
+    x = _mm_scale(np.asarray(y_hist, dtype=float)[-L:], sc).reshape(1, L, 1).astype(np.float32)
+    out = np.asarray(model.predict(x, verbose=0)).reshape(-1)
+    if n_months > len(out):
+        raise ValueError(f"模型一次最多預測 {len(out)} 個月，要求 {n_months} 個月")
+    vals = _mm_unscale(out, sc)[:n_months]
+    if strict and (not np.isfinite(vals).all() or (vals < 0).any()):
+        raise ValueError("模型輸出含有 NaN 或負值")
+    return [float(v) for v in vals]
+
+
+# ---------------------------------------------------------
 # 網站：載入 Colab 訓練好的模型並預測（網頁上不訓練）
 # ---------------------------------------------------------
-MODEL_LABELS = {"lstm_notemp": "LSTM", "temp_adjusted": "氣溫修正模型"}
-MODEL_LABELS_EN = {"lstm_notemp": "LSTM", "temp_adjusted": "Temperature-adjusted"}
-MODEL_COLORS = {"lstm_notemp": "#d62728", "temp_adjusted": "#2ca02c"}
+MODEL_LABELS = {"lstm_notemp": "LSTM"}
+MODEL_LABELS_EN = {"lstm_notemp": "LSTM"}
+MODEL_COLORS = {"lstm_notemp": "#d62728"}
 MAIN_MODEL = "lstm_notemp"
 
 
@@ -379,7 +379,7 @@ def load_bundle(slug):
     cfg = json.loads(path.read_text(encoding="utf-8"))
     models = {}
     for variant, info in cfg["variants"].items():
-        if variant != "notemp":                       # 含氣溫的 LSTM 已不使用，權重檔可以不上傳
+        if variant == "temp":                         # 含氣溫的 LSTM 已不使用，權重檔可以不上傳
             continue
         wp = base / info["weights"]
         if not wp.exists():
@@ -388,17 +388,10 @@ def load_bundle(slug):
     return cfg, models
 
 
-@st.cache_data(show_spinner=False)
-def load_site_temperature():
-    path = Path(__file__).resolve().parent / MODEL_DIR_NAME / "temperature.csv"
-    if not path.exists():
-        raise FileNotFoundError(f"找不到氣溫表 {MODEL_DIR_NAME}/temperature.csv")
-    with open(path, "rb") as f:
-        return load_temperature_file(f)
 
 
-def predict_site(series, temp_s, cfg, models, n_months=12, use_known=False):
-    """用 Colab 訓練好的模型，預測 series 之後的 n_months 個月。回傳 (月份清單, {模型代號: 預測值})。"""
+def predict_site(series, cfg, models, n_months=12):
+    """用 Colab 訓練好的 LSTM，預測 series 之後的 n_months 個月。回傳 (月份清單, {模型代號: 預測值})。"""
     vals = series.to_numpy(dtype=float)
     if len(vals) < LOOKBACK_MONTHS:
         raise ValueError(f"至少需要 {LOOKBACK_MONTHS} 個月的資料，目前只有 {len(vals)} 個月")
@@ -408,22 +401,17 @@ def predict_site(series, temp_s, cfg, models, n_months=12, use_known=False):
 
     last = series.index[-1]
     future = [last + pd.DateOffset(months=i) for i in range(1, n_months + 1)]
-    align_temperature(series.iloc[-LOOKBACK_MONTHS:], temp_s)                   # 確認氣溫表涵蓋最近 12 個月
-
-    out = {}
-    out["lstm_notemp"] = forecast_recursive(models["notemp"], vals, series.index, n_months, cfg["y_scaler"])
-    tm = cfg["temp_model"]
-    _, adj = forecast_temp_adjusted(series, temp_s, n_months, tm["beta_all"],
-                                    {int(k): v for k, v in tm["climatology_all"].items()},
-                                    temp_s if use_known else None)
-    out["temp_adjusted"] = adj
-    return [m.strftime("%Y-%m") for m in future], out
+    if cfg.get("model_type") == "direct":                                       # brain_v2 架構的月度版：一次預測
+        pred = forecast_direct(models["lstm"], vals, cfg["y_scaler"], n_months)
+    else:                                                                       # 舊格式：逐月接回去預測
+        pred = forecast_recursive(models["notemp"], vals, series.index, n_months, cfg["y_scaler"])
+    return [m.strftime("%Y-%m") for m in future], {"lstm_notemp": pred}
 
 
 def _metrics_table_bundle(cfg):
     rows = []
     for kind, kname in [("one_step", "單步預測（每個月都用真實歷史資料）"),
-                        ("recursive", "連續預測（從期初一路預測整段期間）")]:
+                        ("recursive", "整段預測（從期初預測整段期間）")]:
         for key, label in MODEL_LABELS.items():
             for split, sname in [("val", "驗證期"), ("test", "測試期")]:
                 m = cfg["metrics"][kind][key][split]
@@ -554,10 +542,9 @@ def render_monthly_tab():
 
     try:
         cfg, models = load_bundle(slug)
-        temp_s = load_site_temperature()
     except Exception as e:
         st.error(f"❌ 無法載入模型：{e}")
-        st.info("請先執行 Colab 筆記本（EMS_Monthly_LSTM_Colab.ipynb），把下載的 models 資料夾放進 GitHub，和 app.py 同一層。")
+        st.info("請先執行 Colab 筆記本（EMS_Monthly_LSTM_BrainV2_Arch.ipynb），把下載的 models 資料夾放進 GitHub，和 app.py 同一層。")
         return
 
     st.success(f"共 {len(series)} 個月（{series.index[0]:%Y-%m} ～ {series.index[-1]:%Y-%m}）｜"
@@ -565,23 +552,22 @@ def render_monthly_tab():
     if series.index[-1].strftime("%Y-%m") != cfg["data_range"][1]:
         st.warning("⚠️ 你上傳的資料期間與模型訓練時不同。模型仍會用最近 12 個月預測，但建議重新在 Colab 訓練。")
 
+    arch = cfg.get("architecture")
+    if arch:
+        st.caption(f"LSTM 架構：{arch['name']}｜參數量 {arch['params']:,}｜輸入過去 {cfg.get('lookback', 12)} 個月的用電量")
     st.subheader("模型評估（在 Colab 以驗證期與測試期資料計算）")
     one = cfg["metrics"]["one_step"]
-    st.write(f"測試期（單步）MAPE：LSTM **{one['lstm_notemp']['test']['MAPE_%']:.2f}%**、"
-             f"氣溫修正模型 **{one['temp_adjusted']['test']['MAPE_%']:.2f}%**")
+    rec = cfg["metrics"]["recursive"]
+    st.write(f"測試期 MAPE：單步 **{one['lstm_notemp']['test']['MAPE_%']:.2f}%**、"
+             f"整段預測 **{rec['lstm_notemp']['test']['MAPE_%']:.2f}%**")
     with st.expander("📋 點此展開／收合模型評估指標表 (Metrics)", expanded=False):
         st.dataframe(_metrics_table_bundle(cfg), use_container_width=True, hide_index=True)
     _show_predictions(_frame_from_bundle(cfg), unit)
-    st.caption("測試期只有約 11 個月，樣本不多。LSTM 只使用過去的用電量；氣溫修正模型是簡單公式（去年同月用電量，依今年與去年的氣溫差修正）。"
-               "評估時，未來氣溫用「訓練期的同月平均氣溫」，沒有偷看實際氣溫。")
+    st.caption("測試期只有約 11 個月，樣本不多，誤差數字僅供參考。LSTM 只使用過去的用電量，沒有使用氣溫。")
 
     st.subheader("預測未來月份（未來 12 個月）")
-    future = [series.index[-1] + pd.DateOffset(months=i) for i in range(1, 13)]
-    use_known = False
-    if all((m in temp_s.index) and np.isfinite(temp_s[m]) for m in future):
-        use_known = st.checkbox("使用氣溫表中的實際氣溫（預設用歷史同月平均氣溫）", value=False, key="monthly_use_known")
     try:
-        months, lines = predict_site(series, temp_s, cfg, models, 12, use_known)
+        months, lines = predict_site(series, cfg, models, 12)
     except Exception as e:
         st.error(f"❌ 預測失敗：{e}")
         return
