@@ -1,5 +1,5 @@
 {
- "version": "monthly_brainv2_arch_v1",
+ "version": "monthly_brainv2_arch_v3",
  "model_type": "direct",
  "location": "校友",
  "slug": "alumni",
@@ -12,12 +12,12 @@
  "lookback": 12,
  "horizon": 12,
  "architecture": {
-  "name": "brain_v2 架構（LSTM 64→Dropout 0.2→LSTM 32→Dropout 0.2→Dense 12）",
+  "name": "brain_v2 架構（LSTM 32→Dropout 0.2→LSTM 16→Dropout 0.2→Dense 12）｜8 區域合併訓練｜視窗平均值正規化",
   "units": [
-   64,
-   32
+   32,
+   16
   ],
-  "params": 29708
+  "params": 7692
  },
  "split_months": {
   "train": 60,
@@ -25,13 +25,11 @@
   "test": 11
  },
  "y_scaler": {
-  "type": "minmax",
-  "min": 216997.0,
-  "max": 596323.0
+  "type": "window_mean"
  },
  "variants": {
   "lstm": {
-   "weights": "alumni_lstm.npz",
+   "weights": "pooled_lstm.npz",
    "features": 1
   }
  },
@@ -39,28 +37,28 @@
   "one_step": {
    "lstm_notemp": {
     "val": {
-     "MAPE_%": 10.000997327901079,
-     "RMSE": 44456.77254943606,
-     "MAE": 39404.19476529661
+     "MAPE_%": 10.24708015479279,
+     "RMSE": 53557.8532421928,
+     "MAE": 43607.79482458396
     },
     "test": {
-     "MAPE_%": 9.769989274470708,
-     "RMSE": 45930.90349706294,
-     "MAE": 41348.4446253482
+     "MAPE_%": 6.641694595244739,
+     "RMSE": 32508.533462458665,
+     "MAE": 28340.10024406342
     }
    }
   },
   "recursive": {
    "lstm_notemp": {
     "val": {
-     "MAPE_%": 11.859622304055941,
-     "RMSE": 60423.276631181405,
-     "MAE": 49525.73975327735
+     "MAPE_%": 12.500125661564015,
+     "RMSE": 67648.35963751683,
+     "MAE": 54773.225087644954
     },
     "test": {
-     "MAPE_%": 10.41554264640924,
-     "RMSE": 48166.321451448064,
-     "MAE": 44053.15754674527
+     "MAPE_%": 9.433484094777821,
+     "RMSE": 51916.82466104632,
+     "MAE": 39968.012295754095
     }
    }
   }
@@ -84,133 +82,133 @@
    "month": "2023-01",
    "split": "val",
    "actual": 253577.0,
-   "lstm_notemp": 300178.13879081176
+   "lstm_notemp": 282299.9683480266
   },
   {
    "month": "2023-02",
    "split": "val",
    "actual": 254557.0,
-   "lstm_notemp": 289140.8493903983
+   "lstm_notemp": 267729.10287697206
   },
   {
    "month": "2023-03",
    "split": "val",
    "actual": 337170.0,
-   "lstm_notemp": 304918.5758468635
+   "lstm_notemp": 301563.2943743728
   },
   {
    "month": "2023-04",
    "split": "val",
    "actual": 348060.0,
-   "lstm_notemp": 336417.2859823468
+   "lstm_notemp": 329654.65780714847
   },
   {
    "month": "2023-05",
    "split": "val",
    "actual": 459717.0,
-   "lstm_notemp": 382705.18693293113
+   "lstm_notemp": 369259.07101420616
   },
   {
    "month": "2023-06",
    "split": "val",
    "actual": 480840.0,
-   "lstm_notemp": 433744.37737969944
+   "lstm_notemp": 428539.03319721174
   },
   {
    "month": "2023-07",
    "split": "val",
    "actual": 548665.0,
-   "lstm_notemp": 470975.1317619884
+   "lstm_notemp": 445613.17970833794
   },
   {
    "month": "2023-08",
    "split": "val",
    "actual": 498417.0,
-   "lstm_notemp": 478232.8717773007
+   "lstm_notemp": 454814.612196088
   },
   {
    "month": "2023-09",
    "split": "val",
    "actual": 468293.0,
-   "lstm_notemp": 447066.7151995888
+   "lstm_notemp": 466934.051833481
   },
   {
    "month": "2023-10",
    "split": "val",
    "actual": 437793.0,
-   "lstm_notemp": 401233.33927492984
+   "lstm_notemp": 508606.16960904805
   },
   {
    "month": "2023-11",
    "split": "val",
    "actual": 381445.0,
-   "lstm_notemp": 352845.3616072987
+   "lstm_notemp": 403638.40236722294
   },
   {
    "month": "2023-12",
    "split": "test",
    "actual": 343562.0,
-   "lstm_notemp": 308575.9570340266
+   "lstm_notemp": 338602.0351038625
   },
   {
    "month": "2024-01",
    "split": "test",
    "actual": 309632.0,
-   "lstm_notemp": 285430.1454120149
+   "lstm_notemp": 294639.9192476388
   },
   {
    "month": "2024-02",
    "split": "test",
    "actual": 269294.0,
-   "lstm_notemp": 286269.0880680377
+   "lstm_notemp": 293752.14820207545
   },
   {
    "month": "2024-03",
    "split": "test",
    "actual": 355418.0,
-   "lstm_notemp": 309378.371873739
+   "lstm_notemp": 330550.11286270246
   },
   {
    "month": "2024-04",
    "split": "test",
    "actual": 396319.0,
-   "lstm_notemp": 348253.84713034634
+   "lstm_notemp": 365070.92283047736
   },
   {
    "month": "2024-05",
    "split": "test",
    "actual": 440203.0,
-   "lstm_notemp": 400742.3950330614
+   "lstm_notemp": 417541.5346579311
   },
   {
    "month": "2024-06",
    "split": "test",
    "actual": 437952.0,
-   "lstm_notemp": 439808.1628339523
+   "lstm_notemp": 451894.35572817735
   },
   {
    "month": "2024-07",
    "split": "test",
    "actual": 523810.0,
-   "lstm_notemp": 465388.75514247466
+   "lstm_notemp": 458112.21064871206
   },
   {
    "month": "2024-08",
    "split": "test",
    "actual": 507973.0,
-   "lstm_notemp": 460336.6684532501
+   "lstm_notemp": 459999.10071465146
   },
   {
    "month": "2024-09",
    "split": "test",
    "actual": 503396.0,
-   "lstm_notemp": 438322.8472221324
+   "lstm_notemp": 472917.69256446866
   },
   {
    "month": "2024-10",
    "split": "test",
    "actual": 473231.0,
-   "lstm_notemp": 401113.3727221144
+   "lstm_notemp": 503692.1273848892
   }
  ]
 }

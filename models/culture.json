@@ -1,5 +1,5 @@
 {
- "version": "monthly_brainv2_arch_v1",
+ "version": "monthly_brainv2_arch_v3",
  "model_type": "direct",
  "location": "文創",
  "slug": "culture",
@@ -12,12 +12,12 @@
  "lookback": 12,
  "horizon": 12,
  "architecture": {
-  "name": "brain_v2 架構（LSTM 64→Dropout 0.2→LSTM 32→Dropout 0.2→Dense 12）",
+  "name": "brain_v2 架構（LSTM 32→Dropout 0.2→LSTM 16→Dropout 0.2→Dense 12）｜8 區域合併訓練｜視窗平均值正規化",
   "units": [
-   64,
-   32
+   32,
+   16
   ],
-  "params": 29708
+  "params": 7692
  },
  "split_months": {
   "train": 60,
@@ -25,13 +25,11 @@
   "test": 11
  },
  "y_scaler": {
-  "type": "minmax",
-  "min": 3520.0,
-  "max": 18000.0
+  "type": "window_mean"
  },
  "variants": {
   "lstm": {
-   "weights": "culture_lstm.npz",
+   "weights": "pooled_lstm.npz",
    "features": 1
   }
  },
@@ -39,28 +37,28 @@
   "one_step": {
    "lstm_notemp": {
     "val": {
-     "MAPE_%": 10.684510558305865,
-     "RMSE": 1291.5359799071716,
-     "MAE": 1008.6582119758696
+     "MAPE_%": 7.500636290127274,
+     "RMSE": 1103.7969969218111,
+     "MAE": 775.8994102479566
     },
     "test": {
-     "MAPE_%": 15.295512394271924,
-     "RMSE": 1764.538318384278,
-     "MAE": 1558.6816963696388
+     "MAPE_%": 13.169243677805277,
+     "RMSE": 1651.7261551856543,
+     "MAE": 1447.3706417120359
     }
    }
   },
   "recursive": {
    "lstm_notemp": {
     "val": {
-     "MAPE_%": 15.656315180153275,
-     "RMSE": 1804.6847735906747,
-     "MAE": 1627.4575991002653
+     "MAPE_%": 9.912204089997795,
+     "RMSE": 1201.6728643766944,
+     "MAE": 1051.0371192734751
     },
     "test": {
-     "MAPE_%": 17.50495277708396,
-     "RMSE": 2326.2246195419557,
-     "MAE": 1990.8860547912175
+     "MAPE_%": 13.026108761858957,
+     "RMSE": 1804.0565394485302,
+     "MAE": 1497.5203003549825
     }
    }
   }
@@ -84,133 +82,133 @@
    "month": "2023-01",
    "split": "val",
    "actual": 10231.0,
-   "lstm_notemp": 10785.184834338525
+   "lstm_notemp": 10096.320237418613
   },
   {
    "month": "2023-02",
    "split": "val",
    "actual": 8427.0,
-   "lstm_notemp": 10842.5144401102
+   "lstm_notemp": 9033.087592430164
   },
   {
    "month": "2023-03",
    "split": "val",
    "actual": 8467.0,
-   "lstm_notemp": 10921.237965380387
+   "lstm_notemp": 8338.651953984563
   },
   {
    "month": "2023-04",
    "split": "val",
    "actual": 9173.0,
-   "lstm_notemp": 10905.03108569745
+   "lstm_notemp": 7663.849664332711
   },
   {
    "month": "2023-05",
    "split": "val",
    "actual": 9878.0,
-   "lstm_notemp": 10982.241806424528
+   "lstm_notemp": 8411.27137496303
   },
   {
    "month": "2023-06",
    "split": "val",
    "actual": 10584.0,
-   "lstm_notemp": 10993.815817569983
+   "lstm_notemp": 8878.876984393693
   },
   {
    "month": "2023-07",
    "split": "val",
    "actual": 11995.0,
-   "lstm_notemp": 11020.346682642223
+   "lstm_notemp": 9643.886592004887
   },
   {
    "month": "2023-08",
    "split": "val",
    "actual": 11290.0,
-   "lstm_notemp": 11118.00178242409
+   "lstm_notemp": 11129.643004351316
   },
   {
    "month": "2023-09",
    "split": "val",
    "actual": 11290.0,
-   "lstm_notemp": 11089.978182985813
+   "lstm_notemp": 11279.002936603814
   },
   {
    "month": "2023-10",
    "split": "val",
    "actual": 11995.0,
-   "lstm_notemp": 11143.315499683144
+   "lstm_notemp": 11722.702131326321
   },
   {
    "month": "2023-11",
    "split": "val",
    "actual": 11290.0,
-   "lstm_notemp": 11063.14347005124
+   "lstm_notemp": 11099.989200323695
   },
   {
    "month": "2023-12",
    "split": "test",
    "actual": 9173.0,
-   "lstm_notemp": 11157.65687777761
+   "lstm_notemp": 10930.14498689259
   },
   {
    "month": "2024-01",
    "split": "test",
    "actual": 9878.0,
-   "lstm_notemp": 11173.742617203208
+   "lstm_notemp": 8791.968965585764
   },
   {
    "month": "2024-02",
    "split": "test",
    "actual": 10584.0,
-   "lstm_notemp": 11201.886289821474
+   "lstm_notemp": 7926.253984152743
   },
   {
    "month": "2024-03",
    "split": "test",
    "actual": 7762.0,
-   "lstm_notemp": 11314.445840332886
+   "lstm_notemp": 8566.231116957995
   },
   {
    "month": "2024-04",
    "split": "test",
    "actual": 9878.0,
-   "lstm_notemp": 11348.079882699501
+   "lstm_notemp": 8961.620809249465
   },
   {
    "month": "2024-05",
    "split": "test",
    "actual": 12701.0,
-   "lstm_notemp": 11358.300131068063
+   "lstm_notemp": 9632.594601596471
   },
   {
    "month": "2024-06",
    "split": "test",
    "actual": 9878.0,
-   "lstm_notemp": 11394.781068625003
+   "lstm_notemp": 10895.976665635953
   },
   {
    "month": "2024-07",
    "split": "test",
    "actual": 11995.0,
-   "lstm_notemp": 11362.303214898868
+   "lstm_notemp": 11162.683105094568
   },
   {
    "month": "2024-08",
    "split": "test",
    "actual": 13406.0,
-   "lstm_notemp": 11310.599450276357
+   "lstm_notemp": 11410.032023862495
   },
   {
    "month": "2024-09",
    "split": "test",
    "actual": 13406.0,
-   "lstm_notemp": 11346.736250737493
+   "lstm_notemp": 12027.713499677193
   },
   {
    "month": "2024-10",
    "split": "test",
    "actual": 11995.0,
-   "lstm_notemp": 11417.154869412876
+   "lstm_notemp": 12401.591278564554
   }
  ]
 }

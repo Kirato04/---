@@ -348,13 +348,30 @@ def make_direct_samples(y_s, start, end, L=BRAIN_LOOKBACK, H=BRAIN_HORIZON):
     return np.array(X, dtype=np.float32), np.array(Y, dtype=np.float32)
 
 
+def make_direct_samples_rel(values, start, end, L=BRAIN_LOOKBACK, H=BRAIN_HORIZON):
+    """視窗平均值正規化：每個視窗的輸入與輸出，都除以「該視窗輸入 12 個月的平均」。
+    這樣模型學的是相對的起伏形狀，不受用電量整體水準變化（例如宿舍使用率上升）影響。"""
+    X, Y = [], []
+    for i in range(start, end - L - H + 1):
+        m = float(np.mean(values[i:i + L]))
+        X.append((np.asarray(values[i:i + L], dtype=float) / m).astype(np.float32).reshape(L, 1))
+        Y.append((np.asarray(values[i + L:i + L + H], dtype=float) / m).astype(np.float32))
+    return np.array(X, dtype=np.float32), np.array(Y, dtype=np.float32)
+
+
 def forecast_direct(model, y_hist, sc, n_months, L=BRAIN_LOOKBACK, strict=True):
-    """一次預測：用最近 L 個月的真實用電，直接得到未來 H 個月，取前 n_months 個。"""
-    x = _mm_scale(np.asarray(y_hist, dtype=float)[-L:], sc).reshape(1, L, 1).astype(np.float32)
-    out = np.asarray(model.predict(x, verbose=0)).reshape(-1)
+    """一次預測：用最近 L 個月的真實用電，直接得到未來 H 個月，取前 n_months 個。
+    sc["type"] 為 "window_mean" 時，輸入除以視窗平均、輸出乘回視窗平均；否則使用 MinMax 縮放。"""
+    y = np.asarray(y_hist, dtype=float)[-L:]
+    if sc.get("type") == "window_mean":
+        m = float(np.mean(y))
+        out = np.asarray(model.predict((y / m).reshape(1, L, 1).astype(np.float32), verbose=0)).reshape(-1) * m
+    else:
+        x = _mm_scale(y, sc).reshape(1, L, 1).astype(np.float32)
+        out = _mm_unscale(np.asarray(model.predict(x, verbose=0)).reshape(-1), sc)
     if n_months > len(out):
         raise ValueError(f"模型一次最多預測 {len(out)} 個月，要求 {n_months} 個月")
-    vals = _mm_unscale(out, sc)[:n_months]
+    vals = out[:n_months]
     if strict and (not np.isfinite(vals).all() or (vals < 0).any()):
         raise ValueError("模型輸出含有 NaN 或負值")
     return [float(v) for v in vals]
@@ -513,66 +530,159 @@ def _show_forecast(series, months, lines, unit):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _source_campus():
-    file = st.file_uploader("請上傳校園電度電費 Excel 統計檔案", type=["xlsx", "xls"], key="monthly_campus_excel")
+# ---------------------------------------------------------
+# 月度 LSTM（Colab：monthly_lstm_train.py 訓練）：上傳整理好的月度 CSV 預測
+# ---------------------------------------------------------
+MONTHLY_AREAS = ["行政區", "商學", "校友", "男", "女", "中科", "文創"]
+
+
+def load_monthly_csv(file, location):
+    """讀 campus_load_monthly_2018_2024.csv（Timestamp + 7 區，每月一筆、單位 kWh）。
+    不分區：7 區都有值才加總；尾端還沒有資料的月份（例如 2024-11、12）自動去掉。"""
+    df = pd.read_csv(file, encoding="utf-8-sig")
+    if "Timestamp" not in df.columns:
+        raise ValueError("找不到 Timestamp 欄位，請上傳整理好的月度 CSV")
+    miss = [c for c in MONTHLY_AREAS if c not in df.columns]
+    if miss:
+        raise ValueError(f"缺少區域欄位：{miss}")
+    idx = pd.to_datetime(df["Timestamp"], errors="coerce")
+    if idx.isna().any():
+        raise ValueError("Timestamp 有無法辨識的日期")
+    vals = df[MONTHLY_AREAS].apply(pd.to_numeric, errors="coerce")
+    if location == "不分區 (全校總用電)":
+        v = vals.sum(axis=1, min_count=len(MONTHLY_AREAS))
+    else:
+        v = vals[location]
+    s = pd.Series(v.to_numpy(dtype=float), index=idx.dt.to_period("M").dt.to_timestamp()).sort_index()
+    s[s <= 0] = np.nan
+    if s.index.duplicated().any():
+        raise ValueError(f"有重複的月份：{list(s.index[s.index.duplicated()].strftime('%Y-%m'))}")
+    last_ok = s.last_valid_index()
+    if last_ok is None:
+        raise ValueError("檔案裡沒有任何用電資料")
+    s = s.loc[s.first_valid_index():last_ok]
+    full = pd.date_range(s.index.min(), s.index.max(), freq="MS")
+    if len(full.difference(s.index)) > 0 or s.isna().any():
+        bad = sorted(set(full.difference(s.index)) | set(s.index[s.isna()]))
+        raise ValueError(f"中間缺少月份：{[d.strftime('%Y-%m') for d in bad]}")
+    s.index.freq = "MS"
+    return s
+
+
+@st.cache_resource(show_spinner=False)
+def load_monthly_model(slug):
+    """讀 models/monthly_<區域>.json 與 .npz（純 numpy，不需要 TensorFlow）。"""
+    base = Path(__file__).resolve().parent / MODEL_DIR_NAME
+    jp, wp = base / f"monthly_{slug}.json", base / f"monthly_{slug}.npz"
+    if not jp.exists() or not wp.exists():
+        raise FileNotFoundError(f"找不到 {MODEL_DIR_NAME}/monthly_{slug}.json 或 .npz")
+    cfg = json.loads(jp.read_text(encoding="utf-8"))
+    return cfg, NumpyLSTM.from_npz(wp)
+
+
+def monthly_lstm_predict(model, cfg, values, months_idx):
+    """輸入：最近 12 個月的用電量與月份 → 一次輸出接下來 12 個月（和 Colab 的特徵完全相同）。"""
+    L = cfg["look_back"]
+    sc = cfg["scaler"]
+    y = np.asarray(values, dtype=float)[-L:]
+    f = _month_feats(pd.DatetimeIndex(months_idx)[-L:])
+    x = np.column_stack([_mm_scale(y, sc), f[:, 0], f[:, 1]]).reshape(1, L, 3)
+    return _mm_unscale(np.asarray(model.predict(x)).reshape(-1), sc)
+
+
+def _metrics(actual, pred):
+    a, p = np.asarray(actual, dtype=float), np.asarray(pred, dtype=float)
+    m = np.isfinite(a) & np.isfinite(p)
+    a, p = a[m], p[m]
+    return {"月數": int(m.sum()),
+            "MAPE (%)": round(float(np.mean(np.abs(p - a) / a) * 100), 2),
+            "RMSE": round(float(np.sqrt(np.mean((p - a) ** 2)))),
+            "MAE": round(float(np.mean(np.abs(p - a))))}
+
+
+def evaluate_monthly(series, model, cfg):
+    """驗證年、測試年：用前一整年的真實資料，一次預測該年 12 個月；同時和『去年同月』比較。"""
+    rows, frames = [], []
+    for split, yr, name in [("val", cfg["val_year_ad"], "驗證期"), ("test", cfg["test_year_ad"], "測試期")]:
+        start = pd.Timestamp(yr, 1, 1)
+        hist = series[series.index < start]
+        if len(hist) < cfg["look_back"]:
+            continue
+        months = pd.date_range(start, periods=cfg["predict_steps"], freq="MS")
+        pred = monthly_lstm_predict(model, cfg, hist.values, hist.index)
+        actual = series.reindex(months).to_numpy(dtype=float)
+        if np.isnan(actual).all():
+            continue
+        last_year = series.reindex(months - pd.DateOffset(years=1)).to_numpy(dtype=float)
+        rows.append({"資料集": f"{name}（{yr}）", "模型": "LSTM", **_metrics(actual, pred)})
+        rows.append({"資料集": f"{name}（{yr}）", "模型": "去年同月（對照組）", **_metrics(actual, last_year)})
+        frames.append(pd.DataFrame({"actual": actual, "lstm_notemp": pred, "split": split}, index=months))
+    if not frames:
+        return pd.DataFrame(rows), None
+    frame = pd.concat(frames)
+    return pd.DataFrame(rows), frame[frame["actual"].notna()]
+
+
+def _source_monthly_csv():
+    file = st.file_uploader("請上傳整理好的月度用電 CSV（campus_load_monthly_2018_2024.csv）",
+                            type=["csv"], key="monthly_csv")
     if file is None:
-        st.info("💡 請先上傳 107～113 年的電度電費 Excel，系統會自動取出各年 12 個月的用電度數。")
+        st.info("💡 請上傳月度 CSV：欄位為 Timestamp、行政區、商學、校友、男、女、中科、文創，每月一筆、單位 kWh。")
         return None
+    location = st.selectbox("分析地點 / 區域 / 大樓", CAMPUS_LOCATIONS, key="monthly_csv_loc")
     try:
-        xl = pd.ExcelFile(file)
-        default = CAMPUS_SHEET if CAMPUS_SHEET in xl.sheet_names else xl.sheet_names[0]
-        sheet = st.selectbox("資料工作表 (Sheet)", xl.sheet_names, index=xl.sheet_names.index(default),
-                             key="monthly_campus_sheet")
-        location = st.selectbox("分析地點 / 區域 / 大樓", CAMPUS_LOCATIONS, key="monthly_campus_loc")
-        series = load_campus_series(xl, sheet, location)
+        series = load_monthly_csv(file, location)
     except Exception as e:
-        st.error(f"❌ 讀取校園 Excel 失敗：{e}")
+        st.error(f"❌ 讀取月度 CSV 失敗：{e}")
         return None
-    return series, f"度數（{location}）", "kWh", ("campus", file.name, sheet, location)
+    return series, location
 
 
 def render_monthly_tab():
     st.caption("模型已在 Google Colab 訓練完成並存成檔案，網頁只負責載入模型做預測，不會在網頁上訓練。")
-    got = _source_campus()
+    got = _source_monthly_csv()
     if got is None:
         return
-    series, label, unit, key = got
-    location = key[3]
+    series, location = got
+    unit = "kWh"
     slug = LOCATION_SLUGS.get(location)
 
     try:
-        cfg, models = load_bundle(slug)
+        cfg, model = load_monthly_model(slug)
     except Exception as e:
-        st.error(f"❌ 無法載入模型：{e}")
-        st.info("請先執行 Colab 筆記本（EMS_Monthly_LSTM_BrainV2_Arch.ipynb），把下載的 models 資料夾放進 GitHub，和 app.py 同一層。")
+        st.error(f"❌ 無法載入「{location}」的模型：{e}")
+        st.info("目前只有『不分區 (全校總用電)』的模型。其他區域要在 Colab 把 TARGET_ROW 改成該區域重新訓練並匯出。")
         return
 
-    st.success(f"共 {len(series)} 個月（{series.index[0]:%Y-%m} ～ {series.index[-1]:%Y-%m}）｜"
-               f"模型於 {cfg['trained_at']} 在 Colab 訓練，訓練資料 {cfg['data_range'][0]} ～ {cfg['data_range'][1]}")
-    if series.index[-1].strftime("%Y-%m") != cfg["data_range"][1]:
-        st.warning("⚠️ 你上傳的資料期間與模型訓練時不同。模型仍會用最近 12 個月預測，但建議重新在 Colab 訓練。")
+    st.success(f"共 {len(series)} 個月（{series.index[0]:%Y-%m} ～ {series.index[-1]:%Y-%m}）")
+    arch = cfg.get("architecture", {})
+    st.caption(f"LSTM 架構：{' → '.join(arch.get('layers', []))}｜參數量 {arch.get('params', 0):,}｜"
+               f"輸入過去 {cfg['look_back']} 個月（用電量＋月份），一次預測未來 {cfg['predict_steps']} 個月")
 
-    arch = cfg.get("architecture")
-    if arch:
-        st.caption(f"LSTM 架構：{arch['name']}｜參數量 {arch['params']:,}｜輸入過去 {cfg.get('lookback', 12)} 個月的用電量")
-    st.subheader("模型評估（在 Colab 以驗證期與測試期資料計算）")
-    one = cfg["metrics"]["one_step"]
-    rec = cfg["metrics"]["recursive"]
-    st.write(f"測試期 MAPE：單步 **{one['lstm_notemp']['test']['MAPE_%']:.2f}%**、"
-             f"整段預測 **{rec['lstm_notemp']['test']['MAPE_%']:.2f}%**")
-    with st.expander("📋 點此展開／收合模型評估指標表 (Metrics)", expanded=False):
-        st.dataframe(_metrics_table_bundle(cfg), use_container_width=True, hide_index=True)
-    _show_predictions(_frame_from_bundle(cfg), unit)
-    st.caption("測試期只有約 11 個月，樣本不多，誤差數字僅供參考。LSTM 只使用過去的用電量，沒有使用氣溫。")
+    st.subheader("模型評估（驗證期與測試期）")
+    table, frame = evaluate_monthly(series, model, cfg)
+    if frame is None:
+        st.warning("上傳的資料不包含驗證年或測試年，略過評估。")
+    else:
+        lstm_test = table[(table["模型"] == "LSTM") & table["資料集"].str.startswith("測試期")]
+        if not lstm_test.empty:
+            st.write(f"測試期 LSTM MAPE：**{lstm_test['MAPE (%)'].iloc[0]:.2f}%**")
+        with st.expander("📋 點此展開／收合模型評估指標表 (Metrics)", expanded=False):
+            st.dataframe(table, use_container_width=True, hide_index=True)
+        _show_predictions(frame, unit)
+        st.caption("驗證期、測試期各只有一個年度（測試期資料到最後一個有資料的月份），誤差數字僅供參考。")
 
-    st.subheader("預測未來月份（未來 12 個月）")
+    st.subheader(f"預測未來月份（未來 {cfg['predict_steps']} 個月）")
     try:
-        months, lines = predict_site(series, cfg, models, 12)
+        pred = monthly_lstm_predict(model, cfg, series.values, series.index)
+        if not np.isfinite(pred).all() or (pred < 0).any():
+            raise ValueError("模型輸出含有 NaN 或負值")
     except Exception as e:
         st.error(f"❌ 預測失敗：{e}")
         return
-    tbl = pd.DataFrame({"月份": months, **{f"{MODEL_LABELS[k]} ({unit})": [round(v, 2) for v in vals]
-                                          for k, vals in lines.items()}})
+    months = [(series.index[-1] + pd.DateOffset(months=i)).strftime("%Y-%m") for i in range(1, len(pred) + 1)]
+    lines = {"lstm_notemp": [float(v) for v in pred]}
+    tbl = pd.DataFrame({"月份": months, f"LSTM ({unit})": [round(v, 2) for v in lines["lstm_notemp"]]})
     with st.expander("📋 點此展開／收合預測數據表格", expanded=False):
         st.dataframe(tbl, use_container_width=True, hide_index=True)
     _show_forecast(series, months, lines, unit)

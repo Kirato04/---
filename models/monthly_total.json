@@ -1,0 +1,38 @@
+{
+  "model_name": "Monthly LSTM (LSTM 64 → Dense 12)",
+  "architecture": {
+    "layers": [
+      "LSTM(64)",
+      "Dense(12)"
+    ],
+    "params": 18188
+  },
+  "target": "總和",
+  "unit": "kWh",
+  "look_back": 12,
+  "predict_steps": 12,
+  "features": [
+    "value_scaled",
+    "month_sin",
+    "month_cos"
+  ],
+  "scaler": {
+    "type": "minmax",
+    "min": 914097.0,
+    "max": 2561303.0
+  },
+  "train_years_ad": [
+    2018,
+    2019,
+    2020,
+    2021,
+    2022
+  ],
+  "val_year_ad": 2023,
+  "test_year_ad": 2024,
+  "source_files": [
+    "lstm_monthly_model_.h5",
+    "lstm_monthly_scaler.pkl",
+    "lstm_monthly_config.json"
+  ]
+}
