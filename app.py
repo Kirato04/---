@@ -290,40 +290,53 @@ def _sigmoid(x):
 
 
 class NumpyLSTM:
-    """等價於 Keras 的 LSTM(units) -> Dropout -> Dense(1)（Dropout 在推論時不作用）。
-    權重排列與 Keras 相同：kernel (輸入數, 4*units)、recurrent (units, 4*units)，四個閘門依序為 i, f, c, o。"""
+    """等價於 Keras 的「LSTM 堆疊 → Dropout → Dense」（Dropout 在推論時不作用）。
+    layers：[(kernel, recurrent, bias), ...]，每個元素是一層 LSTM；除了最後一層，每層都輸出整段序列給下一層。
+    權重排列與 Keras 相同：kernel (輸入數, 4*單元數)、recurrent (單元數, 4*單元數)，四個閘門依序為 i, f, c, o。"""
 
-    def __init__(self, kernel, recurrent, bias, dense_w, dense_b):
-        self.kernel = np.asarray(kernel, dtype=np.float64)
-        self.recurrent = np.asarray(recurrent, dtype=np.float64)
-        self.bias = np.asarray(bias, dtype=np.float64)
+    def __init__(self, layers, dense_w, dense_b):
+        self.layers = [(np.asarray(k, dtype=np.float64), np.asarray(r, dtype=np.float64), np.asarray(b, dtype=np.float64))
+                       for k, r, b in layers]
         self.dense_w = np.asarray(dense_w, dtype=np.float64)
         self.dense_b = np.asarray(dense_b, dtype=np.float64)
 
     @classmethod
     def from_npz(cls, path):
         z = np.load(path)
-        return cls(z["kernel"], z["recurrent"], z["bias"], z["dense_w"], z["dense_b"])
+        if "kernel" in z.files:                                   # 舊格式：單層 LSTM
+            layers = [(z["kernel"], z["recurrent"], z["bias"])]
+        else:                                                     # 新格式：kernel_0, kernel_1, ...
+            n = sum(1 for k in z.files if k.startswith("kernel_"))
+            layers = [(z[f"kernel_{i}"], z[f"recurrent_{i}"], z[f"bias_{i}"]) for i in range(n)]
+        return cls(layers, z["dense_w"], z["dense_b"])
 
     @property
     def n_features(self):
-        return self.kernel.shape[0]
+        return self.layers[0][0].shape[0]
+
+    @property
+    def units(self):
+        return [r.shape[0] for _, r, _ in self.layers]
 
     def predict(self, X, verbose=0):
-        X = np.asarray(X, dtype=np.float64)
-        B, T, _ = X.shape
-        H = self.recurrent.shape[0]
-        h = np.zeros((B, H))
-        c = np.zeros((B, H))
-        for t in range(T):
-            z = X[:, t, :] @ self.kernel + h @ self.recurrent + self.bias
-            i = _sigmoid(z[:, :H])
-            f = _sigmoid(z[:, H:2 * H])
-            g = np.tanh(z[:, 2 * H:3 * H])
-            o = _sigmoid(z[:, 3 * H:])
-            c = f * c + i * g
-            h = o * np.tanh(c)
-        return h @ self.dense_w + self.dense_b
+        seq = np.asarray(X, dtype=np.float64)
+        for kernel, recurrent, bias in self.layers:
+            B, T, _ = seq.shape
+            H = recurrent.shape[0]
+            h = np.zeros((B, H))
+            c = np.zeros((B, H))
+            outs = []
+            for t in range(T):
+                z = seq[:, t, :] @ kernel + h @ recurrent + bias
+                i = _sigmoid(z[:, :H])
+                f = _sigmoid(z[:, H:2 * H])
+                g = np.tanh(z[:, 2 * H:3 * H])
+                o = _sigmoid(z[:, 3 * H:])
+                c = f * c + i * g
+                h = o * np.tanh(c)
+                outs.append(h)
+            seq = np.stack(outs, axis=1)                          # (B, T, H)：下一層的輸入
+        return seq[:, -1, :] @ self.dense_w + self.dense_b
 
 
 def forecast_recursive(model, y_hist, idx_hist, n_months, y_sc, t_hist=None, t_sc=None, t_future=None, strict=True):
